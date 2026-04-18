@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SakshyaAI – Smart Grievance Verification System</title>
+  <meta name="description" content="SakshyaAI is an AI-assisted grievance resolution verification layer for Gujarat's Swagat portal. Independent verification with IVR, geo-tagged evidence, and auto-reopen logic.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- ───── Sidebar Navigation ───── -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          <path d="M9 12l2 2 4-4"/>
+        </svg>
+      </div>
+      <div>
+        <h1 class="brand-name">SakshyaAI</h1>
+        <p class="brand-tag">Grievance Verification</p>
+      </div>
+    </div>
+
+    <nav class="sidebar-nav">
+      <a href="#" class="nav-link active" data-view="dashboard" id="nav-dashboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        Dashboard
+      </a>
+      <a href="#" class="nav-link" data-view="grievances" id="nav-grievances">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        Grievances
+      </a>
+      <a href="#" class="nav-link" data-view="verification" id="nav-verification">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        Verification
+      </a>
+      <a href="#" class="nav-link" data-view="departments" id="nav-departments">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        Departments
+      </a>
+      <a href="#" class="nav-link" data-view="api-test" id="nav-api-test">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        API Tester
+      </a>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info" id="user-info" style="display:none;">
+        <div class="user-avatar" id="user-avatar">U</div>
+        <div>
+          <p class="user-name" id="user-name">User</p>
+          <p class="user-role" id="user-role">Role</p>
+        </div>
+      </div>
+      <button class="btn-logout" id="btn-logout" style="display:none;" onclick="logout()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        Logout
+      </button>
+    </div>
+  </aside>
+
+  <!-- ───── Main Content Area ───── -->
+  <main class="main-content">
+    <!-- Login Screen -->
+    <div id="login-screen" class="view">
+      <div class="login-container">
+        <div class="login-hero">
+          <div class="hero-shield">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              <path d="M9 12l2 2 4-4"/>
+            </svg>
+          </div>
+          <h2>SakshyaAI</h2>
+          <p>Smart Grievance Verification System</p>
+          <div class="hero-tagline">Independent. Transparent. Accountable.</div>
+        </div>
+        <div class="login-form-box">
+          <h3>Sign In</h3>
+          <p class="login-subtitle">Enter your credentials to access the portal</p>
+          <form id="login-form" onsubmit="handleLogin(event)">
+            <div class="form-group">
+              <label for="login-username">Username</label>
+              <input type="text" id="login-username" placeholder="e.g. collector" required>
+            </div>
+            <div class="form-group">
+              <label for="login-password">Password</label>
+              <input type="password" id="login-password" placeholder="Enter password" required>
+            </div>
+            <button type="submit" class="btn btn-primary btn-full" id="login-btn">Sign In</button>
+            <div class="login-error" id="login-error" style="display:none;"></div>
+          </form>
+          <div class="demo-credentials">
+            <p><strong>Demo Credentials:</strong></p>
+            <div class="cred-chips">
+              <button class="cred-chip" onclick="fillCreds('collector','collector123')">🏛️ Collector</button>
+              <button class="cred-chip" onclick="fillCreds('dept_rbd','dept123')">🏢 Department</button>
+              <button class="cred-chip" onclick="fillCreds('officer1','officer123')">👷 Officer</button>
+              <button class="cred-chip" onclick="fillCreds('citizen1','citizen123')">👤 Citizen</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Dashboard View -->
+    <div id="dashboard-view" class="view" style="display:none;">
+      <div class="view-header">
+        <div>
+          <h2 class="view-title">District Collector Dashboard</h2>
+          <p class="view-subtitle">Real-time grievance verification overview</p>
+        </div>
+        <div class="header-actions">
+          <span class="mock-badge" id="mock-badge">⚡ Mock Mode</span>
+          <button class="btn btn-outline" onclick="refreshDashboard()">↻ Refresh</button>
+        </div>
+      </div>
+
+      <!-- Stats Cards -->
+      <div class="stats-grid" id="stats-grid">
+        <div class="stat-card stat-total">
+          <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div>
+          <div class="stat-value" id="stat-total">—</div>
+          <div class="stat-label">Total Grievances</div>
+        </div>
+        <div class="stat-card stat-open">
+          <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div>
+          <div class="stat-value" id="stat-open">—</div>
+          <div class="stat-label">Open</div>
+        </div>
+        <div class="stat-card stat-pending">
+          <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
+          <div class="stat-value" id="stat-pending">—</div>
+          <div class="stat-label">Pending Verification</div>
+        </div>
+        <div class="stat-card stat-closed">
+          <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div>
+          <div class="stat-value" id="stat-closed">—</div>
+          <div class="stat-label">Verified & Closed</div>
+        </div>
+        <div class="stat-card stat-reopened">
+          <div class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></div>
+          <div class="stat-value" id="stat-reopened">—</div>
+          <div class="stat-label">Auto-Reopened</div>
+        </div>
+      </div>
+
+      <!-- Department Scores Table -->
+      <div class="card">
+        <div class="card-header">
+          <h3>Department Quality Scores</h3>
+          <span class="live-badge">● LIVE</span>
+        </div>
+        <div class="table-wrapper">
+          <table class="data-table" id="dept-scores-table">
+            <thead>
+              <tr>
+                <th>Department</th>
+                <th>District</th>
+                <th>Score</th>
+                <th>Total</th>
+                <th>Verified</th>
+                <th>Failed</th>
+                <th>Pending</th>
+                <th>Reopened</th>
+              </tr>
+            </thead>
+            <tbody id="dept-scores-body">
+              <tr><td colspan="8" class="loading-cell">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Grievances View -->
+    <div id="grievances-view" class="view" style="display:none;">
+      <div class="view-header">
+        <div>
+          <h2 class="view-title">Grievances</h2>
+          <p class="view-subtitle">All registered complaints from Swagat portal</p>
+        </div>
+        <div class="header-actions">
+          <select class="filter-select" id="filter-status" onchange="loadGrievances()">
+            <option value="">All Status</option>
+            <option value="OPEN">Open</option>
+            <option value="PENDING_VERIFICATION">Pending Verification</option>
+            <option value="CLOSED">Closed</option>
+            <option value="REOPENED">Reopened</option>
+          </select>
+          <button class="btn btn-primary" onclick="showCreateGrievanceModal()" id="btn-create-grievance">+ New Grievance</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="table-wrapper">
+          <table class="data-table" id="grievances-table">
+            <thead>
+              <tr>
+                <th>Swagat ID</th>
+                <th>Title</th>
+                <th>Category</th>
+                <th>Address</th>
+                <th>Status</th>
+                <th>Department</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="grievances-body">
+              <tr><td colspan="7" class="loading-cell">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Verification Flow View -->
+    <div id="verification-view" class="view" style="display:none;">
+      <div class="view-header">
+        <div>
+          <h2 class="view-title">Verification Workflow</h2>
+          <p class="view-subtitle">Test the complete verification pipeline</p>
+        </div>
+      </div>
+
+      <div class="workflow-steps">
+        <!-- Step 1: Select Grievance -->
+        <div class="workflow-card">
+          <div class="step-badge">Step 1</div>
+          <h3>Select a PENDING_VERIFICATION Grievance</h3>
+          <p>Choose a grievance that has been marked as resolved by a department</p>
+          <select class="filter-select full-width" id="verify-grievance-select">
+            <option value="">Select a grievance...</option>
+          </select>
+          <div class="grievance-detail-box" id="verify-detail-box" style="display:none;"></div>
+        </div>
+
+        <!-- Step 2: Simulate IVR -->
+        <div class="workflow-card">
+          <div class="step-badge">Step 2</div>
+          <h3>Simulate Citizen IVR Response</h3>
+          <p>In production, Twilio calls the citizen. Here, simulate the response:</p>
+          <div class="ivr-buttons">
+            <button class="btn btn-success ivr-btn" onclick="simulateIvr('1')" id="ivr-confirm-btn">
+              <span class="ivr-key">1</span> Confirm Resolution
+            </button>
+            <button class="btn btn-danger ivr-btn" onclick="simulateIvr('2')" id="ivr-dispute-btn">
+              <span class="ivr-key">2</span> Dispute – Reopen
+            </button>
+          </div>
+          <div class="ivr-result" id="ivr-result" style="display:none;"></div>
+        </div>
+
+        <!-- Step 3: Upload Evidence -->
+        <div class="workflow-card">
+          <div class="step-badge">Step 3</div>
+          <h3>Field Officer Evidence Upload</h3>
+          <p>Submit GPS coordinates and photo evidence (simulated in mock mode)</p>
+          <div class="evidence-form">
+            <div class="form-row">
+              <div class="form-group">
+                <label>Latitude</label>
+                <input type="number" step="0.0001" id="evidence-lat" placeholder="23.0225">
+              </div>
+              <div class="form-group">
+                <label>Longitude</label>
+                <input type="number" step="0.0001" id="evidence-lon" placeholder="72.5714">
+              </div>
+            </div>
+            <button class="btn btn-primary" onclick="submitEvidence()" id="evidence-submit-btn">📸 Upload Evidence + GPS</button>
+          </div>
+          <div class="evidence-result" id="evidence-result" style="display:none;"></div>
+        </div>
+
+        <!-- Step 4: Evaluate -->
+        <div class="workflow-card">
+          <div class="step-badge">Step 4</div>
+          <h3>Run Verification Engine</h3>
+          <p>Trigger the decision engine to evaluate all data and determine final status</p>
+          <button class="btn btn-primary" onclick="runEvaluation()" id="evaluate-btn">⚡ Evaluate Verification</button>
+          <div class="eval-result" id="eval-result" style="display:none;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Departments View -->
+    <div id="departments-view" class="view" style="display:none;">
+      <div class="view-header">
+        <div>
+          <h2 class="view-title">Department Scores</h2>
+          <p class="view-subtitle">Public-facing resolution quality metrics</p>
+        </div>
+      </div>
+      <div class="dept-cards-grid" id="dept-cards-grid"></div>
+    </div>
+
+    <!-- API Tester View -->
+    <div id="api-test-view" class="view" style="display:none;">
+      <div class="view-header">
+        <div>
+          <h2 class="view-title">API Tester</h2>
+          <p class="view-subtitle">Test backend endpoints directly</p>
+        </div>
+      </div>
+
+      <div class="api-tester">
+        <div class="card">
+          <div class="card-header"><h3>Quick API Test</h3></div>
+          <div class="api-form">
+            <div class="form-row">
+              <select class="filter-select" id="api-method">
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+                <option value="PUT">PUT</option>
+                <option value="DELETE">DELETE</option>
+              </select>
+              <input type="text" id="api-url" class="api-url-input" placeholder="/api/health" value="/api/health">
+              <button class="btn btn-primary" onclick="sendApiRequest()" id="api-send-btn">Send</button>
+            </div>
+            <div class="form-group">
+              <label>Request Body (JSON)</label>
+              <textarea id="api-body" class="api-body-input" placeholder='{"key": "value"}'></textarea>
+            </div>
+          </div>
+          <div class="api-response-box">
+            <div class="api-response-header">
+              <span>Response</span>
+              <span class="api-status" id="api-status"></span>
+            </div>
+            <pre class="api-response" id="api-response">Click "Send" to make a request...</pre>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h3>Available Endpoints</h3></div>
+          <div class="endpoints-list">
+            <div class="endpoint" onclick="setEndpoint('GET', '/api/health')"><span class="method get">GET</span> /api/health</div>
+            <div class="endpoint" onclick="setEndpoint('POST', '/api/auth/login', '{&quot;username&quot;:&quot;collector&quot;,&quot;password&quot;:&quot;collector123&quot;}')"><span class="method post">POST</span> /api/auth/login</div>
+            <div class="endpoint" onclick="setEndpoint('GET', '/api/grievances')"><span class="method get">GET</span> /api/grievances</div>
+            <div class="endpoint" onclick="setEndpoint('GET', '/api/departments')"><span class="method get">GET</span> /api/departments</div>
+            <div class="endpoint" onclick="setEndpoint('GET', '/api/collector/dashboard')"><span class="method get">GET</span> /api/collector/dashboard</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ───── Modals ───── -->
+  <div class="modal-overlay" id="modal-overlay" style="display:none;">
+    <div class="modal" id="modal">
+      <div class="modal-header">
+        <h3 id="modal-title">Modal</h3>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- ───── Toast ───── -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
