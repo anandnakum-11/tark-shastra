@@ -13,6 +13,25 @@ The system is designed for a Swagat-style governance flow:
 7. The grievance becomes `verified` only when IVR, photo, and GPS all pass.
 8. Citizen dispute, no answer, suspicious GPS, or invalid evidence reopens the grievance.
 
+## Workflow Diagram
+
+```mermaid
+flowchart TD
+    A[Citizen submits grievance] --> B[Grievance created as open]
+    B --> C[Department Officer resolves case]
+    C --> D[Backend moves grievance to verification_pending]
+    D --> E[Twilio IVR call to citizen]
+    E --> F{Citizen response}
+    F -->|Press 1| G[Field evidence unlocked]
+    F -->|Press 2| H[Reopen grievance]
+    F -->|No answer or failed call| H
+    G --> I[Field Officer captures photo and live GPS]
+    I --> J[Backend validates photo freshness, duplicate hash, timestamp, and GPS distance]
+    J --> K{Evidence valid?}
+    K -->|Yes| L[Mark grievance verified]
+    K -->|No| H
+```
+
 ## Current Features
 
 - Citizen grievance submission with category, priority, department, address, and GPS coordinates.
@@ -47,18 +66,18 @@ tark-shastra/
 |  |- server.js
 |  |- .env.example
 |  |- src/
-|  |  |- config/          # PostgreSQL, Redis, Twilio, Cloudinary
-|  |  |- middleware/      # Auth, role guard, Twilio signature validation
-|  |  |- models/          # Sequelize models
-|  |  |- queues/          # Optional BullMQ workers
-|  |  |- routes/          # Auth, grievances, IVR, evidence, collector APIs
-|  |  |- seed/            # Sequelize seed script
-|  |  |- services/        # Verification, evidence, score, IVR services
+|  |  |- config/
+|  |  |- middleware/
+|  |  |- models/
+|  |  |- queues/
+|  |  |- routes/
+|  |  |- seed/
+|  |  |- services/
 |  |  `- utils/
 |  `- package.json
 |- frontend/
 |  |- src/
-|  |  |- legacy/app.js    # Main browser logic
+|  |  |- legacy/app.js
 |  |  |- styles/app.css
 |  |  |- App.jsx
 |  |  |- main.jsx
@@ -66,7 +85,7 @@ tark-shastra/
 |  |- index.html
 |  `- package.json
 |- migrations/
-|- gj_audio.mp3           # Bundled Gujarati IVR prompt
+|- gj_audio.mp3
 |- package.json
 `- README.md
 ```
@@ -107,14 +126,14 @@ Copy-Item .env.example .env
 Edit `backend/.env`:
 
 ```env
-PORT=5001
+PORT=5000
 DB_HOST=localhost
 DB_PORT=5432
 DB_NAME=grievance_db
 DB_USER=postgres
 DB_PASSWORD=postgres
 JWT_SECRET=change_this_secret_before_deployment
-BASE_URL=http://localhost:5001
+BASE_URL=http://localhost:5000
 MOCK_MODE=true
 ```
 
@@ -169,7 +188,7 @@ npm --prefix backend start
 Backend health check:
 
 ```text
-http://localhost:5001/api/health
+http://localhost:5000/api/health
 ```
 
 Start the frontend:
@@ -187,13 +206,13 @@ http://127.0.0.1:5173
 The frontend API base defaults to:
 
 ```text
-http://localhost:5001
+http://localhost:5000
 ```
 
 To override it:
 
 ```env
-VITE_API_BASE_URL=http://localhost:5001
+VITE_API_BASE_URL=http://localhost:5000
 ```
 
 ## Real Twilio IVR Setup
@@ -203,14 +222,14 @@ Twilio cannot call `localhost`. For real IVR calls, expose the backend through a
 Start ngrok:
 
 ```bash
-ngrok http 5001
+ngrok http 5000
 ```
 
 Copy the HTTPS URL and set:
 
 ```env
 MOCK_MODE=false
-BASE_URL=http://localhost:5001
+BASE_URL=http://localhost:5000
 PUBLIC_BASE_URL=https://your-ngrok-url.ngrok-free.app
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_AUTH_TOKEN=your_twilio_auth_token
@@ -227,7 +246,7 @@ When `TO_PHONE_NUMBER` is set, every IVR call goes to that number instead of the
 
 Restart the backend after changing `.env`.
 
-### Why Calls Do Not Trigger
+## Why Calls Do Not Trigger
 
 If `MOCK_MODE=false` and no public HTTPS URL is configured, the backend refuses to start the real call and returns a setup hint. This prevents cases from getting stuck in `verification_pending` when Twilio cannot reach the webhook.
 
@@ -369,7 +388,7 @@ npm.cmd --prefix frontend run dev
 - Sign in as a citizen.
 - Ensure the department dropdown has a selected value.
 - Ensure latitude and longitude are valid numbers.
-- Check backend health at `http://localhost:5001/api/health`.
+- Check backend health at `http://localhost:5000/api/health`.
 
 ### Resolve button does not place a call
 
