@@ -1,4 +1,5 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001';
+const defaultApiBase = `${window.location.protocol}//${window.location.hostname}:5000`;
+const API_BASE = import.meta.env.VITE_API_BASE_URL || defaultApiBase;
 const FALLBACK_DEPARTMENTS = [
   'Public Works',
   'Water Supply',
@@ -58,6 +59,69 @@ const ROLE_LABELS = {
   department_officer: 'Department Officer',
   collector: 'Collector',
 };
+
+function formatIvrResult(value) {
+  if (value === 'resolved') return 'Citizen pressed 1 (Resolved)';
+  if (value === 'not_resolved') return 'Citizen pressed 2 (Not resolved)';
+  if (value === 'no_answer') return 'No answer';
+  return 'Waiting for citizen response';
+}
+
+function getStep3State(ivrResult) {
+  if (ivrResult === 'resolved') {
+    return {
+      tone: 'success',
+      message: 'Step 3 is open. Citizen pressed 1, so the field officer can now upload photo and GPS evidence.',
+    };
+  }
+
+  if (ivrResult === 'not_resolved') {
+    return {
+      tone: 'error',
+      message: 'Step 3 is closed. Citizen pressed 2, so the grievance should be reopened.',
+    };
+  }
+
+  if (ivrResult === 'no_answer') {
+    return {
+      tone: 'warning',
+      message: 'Step 3 is closed. Citizen did not respond to the IVR call.',
+    };
+  }
+
+  return {
+    tone: 'info',
+    message: 'Waiting for IVR confirmation before Step 3 opens.',
+  };
+}
+
+function updateVerificationPanels(verificationLog) {
+  const ivrPanel = document.getElementById('ivr-result');
+  const step3Panel = document.getElementById('step3-result');
+  const evalPanel = document.getElementById('eval-result');
+  const ivrResult = verificationLog?.ivrResult || null;
+  const step3State = getStep3State(ivrResult);
+
+  if (ivrPanel) {
+    ivrPanel.className = `result-card ${step3State.tone}`;
+    ivrPanel.innerHTML = `
+      <strong>IVR Status:</strong> ${formatIvrResult(ivrResult)}<br>
+      <strong>Saved Decision:</strong> ${verificationLog?.reason || 'Awaiting citizen keypad input.'}
+    `;
+  }
+
+  if (step3Panel) {
+    step3Panel.className = `result-card ${step3State.tone}`;
+    step3Panel.textContent = step3State.message;
+  }
+
+  if (evalPanel) {
+    evalPanel.className = `result-card ${step3State.tone === 'error' ? 'error' : 'info'}`;
+    evalPanel.innerHTML = verificationLog?.reason
+      ? `<strong>System decision:</strong> ${verificationLog.reason}`
+      : 'Verified only when IVR = 1, photo exists, and GPS is valid. Otherwise the grievance is reopened or remains pending evidence.';
+  }
+}
 
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
@@ -158,6 +222,14 @@ function categoryLabel(category) {
 
 function formatDepartmentName(value) {
   return value || 'Unassigned';
+}
+
+function canTriggerCitizenCall(status) {
+  return ['open', 'in_progress', 'reopened', 'verification_pending'].includes(status);
+}
+
+function getCitizenCallActionLabel(status) {
+  return status === 'verification_pending' ? 'Call Again' : 'Resolve';
 }
 
 function scoreColor(score) {
@@ -469,7 +541,7 @@ async function loadGrievances() {
 
   tbody.innerHTML = data.grievances.map((grievance) => {
     const statusInfo = formatStatus(grievance.status);
-    const canResolve = ['department_officer', 'collector'].includes(currentUser?.role) && ['open', 'in_progress', 'reopened'].includes(grievance.status);
+    const canResolve = ['department_officer', 'collector'].includes(currentUser?.role) && canTriggerCitizenCall(grievance.status);
     return `
       <tr>
         <td><strong>${grievance.swagatId}</strong></td>
@@ -479,7 +551,7 @@ async function loadGrievances() {
         <td><span class="status-badge ${statusInfo.className}">${statusInfo.label}</span></td>
         <td>${formatDepartmentName(grievance.department)}</td>
         <td>
-          ${canResolve ? `<button class="secondary-button" onclick="resolveGrievance('${grievance.id}')">Resolve</button>` : ''}
+          ${canResolve ? `<button class="secondary-button" onclick="resolveGrievance('${grievance.id}')">${getCitizenCallActionLabel(grievance.status)}</button>` : ''}
           <button class="secondary-button" onclick="viewGrievanceDetail('${grievance.id}')">View</button>
         </td>
       </tr>
@@ -495,7 +567,9 @@ async function resolveGrievance(id) {
   }
 
   showToast(data.ivrCall?.phone
-    ? `Citizen IVR call started for ${data.ivrCall.phone}. Field evidence unlocks after the citizen presses 1.`
+    ? data.grievance?.status === 'verification_pending' && data.message?.toLowerCase().includes('retried')
+      ? `Citizen IVR call retried for ${data.ivrCall.phone}. The latest citizen response will be used.`
+      : `Citizen IVR call started for ${data.ivrCall.phone}. Field evidence unlocks after the citizen presses 1.`
     : data.message || 'Grievance moved to verification workflow.',
     data.ivrCall?.phone ? 'success' : 'warning');
   loadGrievances();
@@ -627,6 +701,7 @@ async function loadVerificationView() {
   select.innerHTML = '<option value="">Select a grievance</option>';
   box.style.display = 'none';
   box.innerHTML = '';
+  updateVerificationPanels(null);
 
   const responses = [pendingResponse, openResponse, reopenedResponse];
   const failedResponse = responses.find((response) => !response.ok);
@@ -668,6 +743,8 @@ async function loadVerificationView() {
     }
 
     const grievance = data.grievance;
+    const verificationLog = data.verificationLog || null;
+    const step3State = getStep3State(verificationLog?.ivrResult);
     box.style.display = 'block';
     box.innerHTML = `
       <div class="detail-title">${grievance.title}</div>
@@ -676,16 +753,16 @@ async function loadVerificationView() {
       <div class="detail-line"><strong>Citizen phone:</strong> ${grievance.citizen?.phone || '-'}</div>
       <div class="detail-line"><strong>Coordinates:</strong> ${grievance.locationLat}, ${grievance.locationLng}</div>
       <div class="detail-line"><strong>Assigned Officer:</strong> ${grievance.assignedOfficer?.name || 'Pending automatic assignment'}</div>
-      <div class="detail-line"><strong>IVR response:</strong> ${data.verificationLog?.ivrResult || 'Waiting for real IVR response'}</div>
-      <div class="detail-line"><strong>System decision:</strong> ${data.verificationLog?.reason || 'No decision yet'}</div>
-      ${['open', 'in_progress', 'reopened'].includes(grievance.status) && ['department_officer', 'collector'].includes(currentUser?.role)
-        ? `<div class="detail-line"><button class="primary-button" onclick="resolveAndReload('${grievance.id}')">Resolve and Call Citizen</button></div>`
+      <div class="detail-line"><strong>IVR response:</strong> ${formatIvrResult(verificationLog?.ivrResult)}</div>
+      <div class="detail-line"><strong>Step 3 status:</strong> ${step3State.message}</div>
+      <div class="detail-line"><strong>System decision:</strong> ${verificationLog?.reason || 'No decision yet'}</div>
+      ${canTriggerCitizenCall(grievance.status) && ['department_officer', 'collector'].includes(currentUser?.role)
+        ? `<div class="detail-line"><button class="primary-button" onclick="resolveAndReload('${grievance.id}')">${grievance.status === 'verification_pending' ? 'Call Citizen Again' : 'Resolve and Call Citizen'}</button></div>`
         : ''}
     `;
-  };
 
-  document.getElementById('ivr-result').style.display = 'block';
-  document.getElementById('eval-result').style.display = 'block';
+    updateVerificationPanels(verificationLog);
+  };
 }
 
 async function resolveAndReload(id) {

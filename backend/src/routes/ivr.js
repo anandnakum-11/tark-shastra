@@ -10,6 +10,7 @@ const { generateWelcomeTwiml, generateResponseTwiml } = require('../services/ivr
 const { CITIZEN_RESPONSE } = require('../utils/constants');
 const { evaluateVerification, scheduleEvidenceTimeout } = require('../services/verificationEngine');
 const logger = require('../utils/logger');
+const { getTwilioWebhookBaseUrl } = require('../config/twilio');
 
 const ivrUploadsDir = path.join(__dirname, '../../uploads/ivr');
 
@@ -45,6 +46,21 @@ async function getLatestVerificationLog(grievanceId) {
   });
 }
 
+function getRequestBaseUrl(req) {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const host = String(req.headers.host || '').trim();
+
+  if (forwardedProto && host) {
+    return `${forwardedProto}://${host}`;
+  }
+
+  if (req.protocol && host) {
+    return `${req.protocol}://${host}`;
+  }
+
+  return getTwilioWebhookBaseUrl();
+}
+
 router.post('/audio', auth, roleGuard('collector'), audioUpload.single('audio'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'Audio file is required.' });
@@ -75,16 +91,16 @@ router.get('/audio/gj_audio.mp3', (req, res) => {
   res.sendFile(audioPath);
 });
 
-router.post('/welcome', validateTwilio, (req, res) => {
+router.all('/welcome', validateTwilio, (req, res) => {
   const { grievanceId } = req.query;
   logger.info(`IVR welcome webhook for grievance: ${grievanceId}`);
 
-  const twiml = generateWelcomeTwiml(grievanceId);
+  const twiml = generateWelcomeTwiml(grievanceId, getRequestBaseUrl(req));
   res.type('text/xml');
   res.send(twiml);
 });
 
-router.post('/response', validateTwilio, async (req, res) => {
+router.all('/response', validateTwilio, async (req, res) => {
   try {
     const { grievanceId } = req.query;
     const digits = req.body.Digits;
@@ -118,7 +134,7 @@ router.post('/response', validateTwilio, async (req, res) => {
   }
 });
 
-router.post('/status', validateTwilio, async (req, res) => {
+router.all('/status', validateTwilio, async (req, res) => {
   try {
     const { grievanceId } = req.query;
     const { CallStatus } = req.body;

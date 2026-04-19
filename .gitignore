@@ -7,3 +7,6 @@
 /backend/uploads
 /backend/tmp-test-images
 /backend/backend_start.log
+*.log
+*.out.log
+*.err.log

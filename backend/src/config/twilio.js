@@ -11,6 +11,14 @@ function getTwilioWebhookBaseUrl() {
   return String(process.env.PUBLIC_BASE_URL || process.env.BASE_URL || '').replace(/\/$/, '');
 }
 
+function getLocalPortHint() {
+  try {
+    return new URL(process.env.BASE_URL || 'http://localhost:5000').port || process.env.PORT || '5000';
+  } catch (error) {
+    return process.env.PORT || '5000';
+  }
+}
+
 function assertTwilioConfig({ allowLocalWebhook = false } = {}) {
   const required = process.env.MOCK_MODE === 'true'
     ? []
@@ -32,7 +40,7 @@ function assertTwilioConfig({ allowLocalWebhook = false } = {}) {
 
   if (process.env.MOCK_MODE !== 'true' && isLocalUrl(webhookBaseUrl) && !allowLocalWebhook) {
     throw new Error(
-      'Twilio real-call mode needs a public HTTPS webhook URL. Start ngrok for port 5001 and set PUBLIC_BASE_URL to the ngrok HTTPS URL, or set MOCK_MODE=true for local testing.'
+      `Twilio real-call mode needs a public HTTPS webhook URL. Start a tunnel for port ${getLocalPortHint()} and set PUBLIC_BASE_URL to that HTTPS URL, or set MOCK_MODE=true for local testing.`
     );
   }
 
@@ -50,14 +58,15 @@ function getTwilioClient() {
 
 async function makeIvrCall(toPhone, grievanceId) {
   const baseUrl = assertTwilioConfig();
+  const { generateWelcomeTwiml } = require('../services/ivrService');
 
   const encodedGrievanceId = encodeURIComponent(grievanceId);
-  const url = `${baseUrl}/api/ivr/welcome?grievanceId=${encodedGrievanceId}`;
   const statusCallback = `${baseUrl}/api/ivr/status?grievanceId=${encodedGrievanceId}`;
+  const twiml = generateWelcomeTwiml(grievanceId, baseUrl);
 
   if (process.env.MOCK_MODE === 'true') {
     logger.info(`[MOCK TWILIO] IVR call to ${toPhone} for grievance ${grievanceId}`);
-    logger.info(`[MOCK TWILIO] TwiML URL: ${url}`);
+    logger.info(`[MOCK TWILIO] Inline TwiML generated for grievance ${grievanceId}`);
     return {
       sid: `MOCK_CALL_${Date.now()}`,
       status: 'queued',
@@ -70,8 +79,7 @@ async function makeIvrCall(toPhone, grievanceId) {
   const call = await client.calls.create({
     to: toPhone,
     from: process.env.TWILIO_PHONE_NUMBER,
-    url,
-    method: 'POST',
+    twiml,
     statusCallback,
     statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
     statusCallbackMethod: 'POST',

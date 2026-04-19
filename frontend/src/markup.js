@@ -275,7 +275,7 @@ export const appMarkup = String.raw`
           <article class="workflow-card">
             <div class="step-pill">Step 2</div>
             <h3>Automated IVR response</h3>
-            <p>After Resolve, the backend places the IVR call automatically. Officers cannot enter IVR responses manually; keypad input is captured only by Twilio.</p>
+            <p>After Resolve, the backend places the IVR call automatically. The citizen hears a prompt to press 1 or 2, and that keypad response is saved for the department officer.</p>
             <div class="inline-upload" id="ivr-audio-admin" style="display:none;">
               <label class="field">
                 <span>Collector IVR audio prompt</span>
@@ -285,16 +285,16 @@ export const appMarkup = String.raw`
               <div class="inline-hint" id="ivr-audio-status">Upload a Gujarati MP3/WAV prompt once; future calls will play it automatically.</div>
             </div>
             <div class="result-card info" id="ivr-result" style="display:block;">
-              Waiting for the citizen response from the real IVR call. Press 1 continues verification; Press 2 reopens the grievance.
+              Waiting for the citizen response from the real IVR call. Press 1 unlocks field verification; Press 2 reopens the grievance.
             </div>
           </article>
 
           <article class="workflow-card">
             <div class="step-pill">Step 3</div>
             <h3>Capture field evidence</h3>
-            <p>After the citizen confirms, Field Officers use the Evidence page to capture a live camera photo plus GPS.</p>
-            <div class="result-card info" style="display:block;">
-              Open the <strong>Evidence</strong> tab only after IVR confirmation to capture a fresh photo, collect GPS, and run evidence checks.
+            <p>After the citizen confirms with 1, Field Officers use the Evidence page to capture a live camera photo plus GPS.</p>
+            <div class="result-card info" id="step3-result" style="display:block;">
+              Waiting for IVR confirmation before Step 3 opens.
             </div>
           </article>
 

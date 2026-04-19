@@ -1,52 +1,32 @@
 const VoiceResponse = require('twilio').twiml.VoiceResponse;
 const { getTwilioWebhookBaseUrl } = require('../config/twilio');
 
-const VOICE_OPTIONS = {
-  language: 'gu-IN',
-  voice: 'Google.gu-IN-Standard-A',
-};
-
 function say(twiml, text) {
-  twiml.say(VOICE_OPTIONS, text);
+  twiml.say(text);
 }
 
-function getPromptAudioUrl() {
-  if (process.env.IVR_AUDIO_URL) {
-    return process.env.IVR_AUDIO_URL;
-  }
-
-  const baseUrl = getTwilioWebhookBaseUrl();
-  return baseUrl ? `${baseUrl}/api/ivr/audio/gj_audio.mp3` : '';
+function buildWebhookUrl(baseUrl, path) {
+  const normalizedBaseUrl = String(baseUrl || getTwilioWebhookBaseUrl() || '').replace(/\/$/, '');
+  return normalizedBaseUrl ? `${normalizedBaseUrl}${path}` : path;
 }
 
-function buildWebhookUrl(path) {
-  const baseUrl = getTwilioWebhookBaseUrl();
-  return baseUrl ? `${baseUrl}${path}` : path;
-}
-
-function generateWelcomeTwiml(grievanceId) {
+function generateWelcomeTwiml(grievanceId, baseUrl) {
   const twiml = new VoiceResponse();
 
   const gather = twiml.gather({
     numDigits: 1,
-    action: buildWebhookUrl(`/api/ivr/response?grievanceId=${encodeURIComponent(grievanceId)}`),
+    action: buildWebhookUrl(baseUrl, `/api/ivr/response?grievanceId=${encodeURIComponent(grievanceId)}`),
     method: 'POST',
     timeout: 10,
-    language: 'gu-IN',
     actionOnEmptyResult: true,
   });
 
-  const promptAudioUrl = getPromptAudioUrl();
-  if (promptAudioUrl) {
-    gather.play(promptAudioUrl);
-  } else {
-    say(
-      gather,
-      'નમસ્તે. આ સક્ષ્ય એ આઈ ફરિયાદ ચકાસણી સિસ્ટમ તરફથી કોલ છે. જો તમારી ફરિયાદ સંતોષકારક રીતે ઉકેલાઈ ગઈ હોય તો એક દબાવો. જો સમસ્યા હજુ ચાલુ હોય તો બે દબાવો.'
-    );
-  }
+  say(
+    gather,
+    'Select 1 or 2. Press 1 if your complaint is resolved. Press 2 if your complaint is not resolved.'
+  );
 
-  say(twiml, 'કોઈ જવાબ મળ્યો નથી. ફરિયાદ ફરીથી ખોલવામાં આવશે. આભાર.');
+  say(twiml, 'No response received. The grievance will be reopened. Thank you.');
 
   return twiml.toString();
 }
@@ -55,14 +35,14 @@ function generateResponseTwiml(digit) {
   const twiml = new VoiceResponse();
 
   if (digit === '1') {
-    say(twiml, 'આભાર. તમારો પ્રતિસાદ નોંધવામાં આવ્યો છે. હવે ફિલ્ડ વેરિફિકેશન પછી ફરિયાદ બંધ કરવામાં આવશે. નમસ્તે.');
+    say(twiml, 'Thank you. Your response has been recorded. Field verification is now unlocked.');
   } else if (digit === '2') {
-    say(twiml, 'આભાર. તમારો વિવાદ નોંધવામાં આવ્યો છે. ફરિયાદ ફરીથી ખોલવામાં આવશે. નમસ્તે.');
+    say(twiml, 'Thank you. Your response has been recorded. The grievance will be reopened.');
   } else {
-    say(twiml, 'અમાન્ય જવાબ મળ્યો છે. ફરિયાદ ફરીથી ખોલવામાં આવશે. નમસ્તે.');
+    say(twiml, 'Invalid input received. The grievance will be reopened.');
   }
 
   return twiml.toString();
 }
 
-module.exports = { generateWelcomeTwiml, generateResponseTwiml, getPromptAudioUrl, buildWebhookUrl };
+module.exports = { generateWelcomeTwiml, generateResponseTwiml, buildWebhookUrl };

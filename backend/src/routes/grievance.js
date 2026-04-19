@@ -36,6 +36,22 @@ async function getLatestVerificationLog(grievanceId) {
   });
 }
 
+async function prepareVerificationRetry(grievanceId) {
+  const verificationLog = await getLatestVerificationLog(grievanceId);
+  if (!verificationLog) {
+    throw new Error('No verification log exists for this pending grievance.');
+  }
+
+  verificationLog.status = 'pending';
+  verificationLog.ivrResult = null;
+  verificationLog.reason = 'Citizen IVR call retried. Awaiting citizen response.';
+  verificationLog.evidenceId = null;
+  verificationLog.gpsResult = null;
+  await verificationLog.save();
+
+  return verificationLog;
+}
+
 router.post('/', auth, roleGuard('citizen'), async (req, res) => {
   try {
     const { title, description, category, address, latitude, longitude, department, priority } = req.body;
@@ -158,15 +174,12 @@ router.post('/:id/resolve', auth, roleGuard('department_officer', 'collector'), 
       return res.status(403).json({ error: 'You can only resolve grievances assigned to your department.' });
     }
 
-    if (grievance.status === GRIEVANCE_STATUS.PENDING_VERIFICATION) {
-      return res.status(409).json({ error: 'Grievance is already pending verification.', status: grievance.status });
-    }
-
     if (grievance.status === GRIEVANCE_STATUS.CLOSED) {
       return res.status(409).json({ error: 'Grievance is already verified.', status: grievance.status });
     }
 
-    if (!RESOLVABLE_STATUSES.has(grievance.status)) {
+    const isRetry = grievance.status === GRIEVANCE_STATUS.PENDING_VERIFICATION;
+    if (!isRetry && !RESOLVABLE_STATUSES.has(grievance.status)) {
       return res.status(409).json({
         error: `Grievance cannot be resolved from status "${grievance.status}".`,
         status: grievance.status,
@@ -175,38 +188,48 @@ router.post('/:id/resolve', auth, roleGuard('department_officer', 'collector'), 
 
     const previousStatus = grievance.status;
     const previousResolvedAt = grievance.resolvedAt;
-    grievance.status = GRIEVANCE_STATUS.PENDING_VERIFICATION;
-    grievance.resolvedAt = new Date();
-    if (!grievance.assignedOfficerId) {
-      const fieldOfficer = await User.findOne({
-        where: {
-          role: USER_ROLES.OFFICER,
-          department: grievance.department,
-        },
-        order: [['created_at', 'ASC']],
-      });
+    let verificationLog = null;
 
-      if (fieldOfficer) {
-        grievance.assignedOfficerId = fieldOfficer.id;
+    if (isRetry) {
+      verificationLog = await prepareVerificationRetry(grievance.id);
+    } else {
+      grievance.status = GRIEVANCE_STATUS.PENDING_VERIFICATION;
+      grievance.resolvedAt = new Date();
+      if (!grievance.assignedOfficerId) {
+        const fieldOfficer = await User.findOne({
+          where: {
+            role: USER_ROLES.OFFICER,
+            department: grievance.department,
+          },
+          order: [['created_at', 'ASC']],
+        });
+
+        if (fieldOfficer) {
+          grievance.assignedOfficerId = fieldOfficer.id;
+        }
       }
-    }
-    await grievance.save();
+      await grievance.save();
 
-    const verificationLog = await VerificationLog.create({
-      grievanceId: grievance.id,
-      status: 'pending',
-    });
+      verificationLog = await VerificationLog.create({
+        grievanceId: grievance.id,
+        status: 'pending',
+      });
+    }
 
     let ivrCall = null;
     try {
       const { triggerCitizenVerificationCall } = require('../services/verificationEngine');
       ivrCall = await triggerCitizenVerificationCall(grievance.id);
     } catch (callErr) {
-      grievance.status = previousStatus;
-      grievance.resolvedAt = previousResolvedAt;
-      await grievance.save();
-      verificationLog.status = 'failed';
-      verificationLog.reason = `Unable to start citizen IVR call: ${callErr.message}`;
+      if (isRetry) {
+        verificationLog.reason = `Unable to retry citizen IVR call: ${callErr.message}`;
+      } else {
+        grievance.status = previousStatus;
+        grievance.resolvedAt = previousResolvedAt;
+        await grievance.save();
+        verificationLog.status = 'failed';
+        verificationLog.reason = `Unable to start citizen IVR call: ${callErr.message}`;
+      }
       await verificationLog.save();
       logger.warn(`IVR trigger failed for grievance ${grievance.id}: ${callErr.message}`);
       return res.status(502).json({
@@ -224,7 +247,9 @@ router.post('/:id/resolve', auth, roleGuard('department_officer', 'collector'), 
       jobId: ivrCall?.callSid || null,
       ivrCall,
       message: ivrCall
-        ? 'Citizen IVR confirmation started. If the citizen presses 1, the field officer evidence task can proceed.'
+        ? isRetry
+          ? 'Citizen IVR call retried successfully. Awaiting the latest citizen response.'
+          : 'Citizen IVR confirmation started. If the citizen presses 1, the field officer evidence task can proceed.'
         : 'Grievance marked for verification, but citizen IVR could not be started. Please check the citizen phone number or Twilio configuration.',
       grievance: formatGrievance(grievance),
       verificationLog,

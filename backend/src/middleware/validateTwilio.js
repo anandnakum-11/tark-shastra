@@ -10,6 +10,11 @@ function validateTwilio(req, res, next) {
     return next();
   }
 
+  if (process.env.SKIP_TWILIO_SIGNATURE_VALIDATION === 'true') {
+    logger.warn('Twilio signature validation skipped because SKIP_TWILIO_SIGNATURE_VALIDATION=true');
+    return next();
+  }
+
   const twilioSignature = req.headers['x-twilio-signature'];
   const authToken = process.env.TWILIO_AUTH_TOKEN;
   const baseUrl = getTwilioWebhookBaseUrl();
