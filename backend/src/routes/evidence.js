@@ -4,8 +4,10 @@ const router = require('express').Router();
 const auth = require('../middleware/auth');
 const roleGuard = require('../middleware/roleGuard');
 const Evidence = require('../models/Evidence');
+const VerificationLog = require('../models/VerificationLog');
 const { confirmEvidenceUpload } = require('../services/evidenceService');
-const { triggerCitizenVerificationCall } = require('../services/verificationEngine');
+const { evaluateVerification, clearEvidenceTimeout } = require('../services/verificationEngine');
+const { CITIZEN_RESPONSE } = require('../utils/constants');
 const logger = require('../utils/logger');
 
 const upload = multer({
@@ -31,6 +33,18 @@ router.post('/upload', auth, roleGuard('field_officer', 'collector'), upload.sin
       return res.status(400).json({ error: 'grievanceId, latitude, longitude, timestamp, and photo are required.' });
     }
 
+    const verificationLog = await VerificationLog.findOne({
+      where: { grievanceId },
+      order: [['created_at', 'DESC']],
+    });
+
+    if (!verificationLog || verificationLog.ivrResult !== CITIZEN_RESPONSE.CONFIRMED) {
+      return res.status(409).json({
+        error: 'Citizen IVR confirmation is required before field evidence can be accepted.',
+        ivrResult: verificationLog?.ivrResult || 'pending',
+      });
+    }
+
     const result = await confirmEvidenceUpload({
       grievanceId,
       file: req.file,
@@ -40,14 +54,13 @@ router.post('/upload', auth, roleGuard('field_officer', 'collector'), upload.sin
       userId: req.user.id,
     });
 
-    let ivrCall = null;
     try {
-      ivrCall = await triggerCitizenVerificationCall(grievanceId);
-    } catch (callErr) {
-      logger.warn(`IVR trigger after evidence upload failed for grievance ${grievanceId}: ${callErr.message}`);
+      result.finalDecision = await evaluateVerification(grievanceId);
+      clearEvidenceTimeout(grievanceId);
+    } catch (evaluationErr) {
+      logger.warn(`Final verification evaluation after evidence upload failed for grievance ${grievanceId}: ${evaluationErr.message}`);
     }
 
-    result.ivrCall = ivrCall;
     res.status(result.isValid ? 201 : 422).json(result);
   } catch (err) {
     logger.error(`Evidence upload error: ${err.message}`);

@@ -1,4 +1,12 @@
-const API_BASE = 'http://localhost:5000';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001';
+const FALLBACK_DEPARTMENTS = [
+  'Public Works',
+  'Water Supply',
+  'Sanitation',
+  'Electricity',
+  'Drainage',
+  'Street Lighting',
+];
 
 function safeParseJson(value) {
   try {
@@ -19,6 +27,7 @@ let evidenceCapturedAt = null;
 let evidencePreviewUrl = null;
 let evidenceGpsCaptured = false;
 let authResetInFlight = false;
+let hasInitialized = false;
 
 const VIEW_ACCESS = {
   citizen: ['dashboard', 'grievances'],
@@ -129,6 +138,11 @@ function applyRoleVisibility() {
   const newGrievanceButton = document.getElementById('new-grievance-btn');
   if (newGrievanceButton) {
     newGrievanceButton.style.display = currentUser?.role === 'citizen' ? 'inline-flex' : 'none';
+  }
+
+  const ivrAudioAdmin = document.getElementById('ivr-audio-admin');
+  if (ivrAudioAdmin) {
+    ivrAudioAdmin.style.display = currentUser?.role === 'collector' ? 'block' : 'none';
   }
 }
 
@@ -337,18 +351,28 @@ async function ensureDepartmentsLoaded() {
   const { ok, data } = await api('/api/departments');
   const select = document.getElementById('create-department');
 
-  if (ok && Array.isArray(data.departments)) {
+  if (ok && Array.isArray(data.departments) && data.departments.length) {
     departmentsCache = data.departments;
-    if (select) {
+  } else {
+    departmentsCache = FALLBACK_DEPARTMENTS.map((name) => ({ name }));
+  }
+
+  if (select) {
+    if (departmentsCache.length) {
       select.innerHTML = departmentsCache
         .map((department) => `<option value="${department.name}">${department.name}</option>`)
         .join('');
+    } else {
+      select.innerHTML = '<option value="">No departments available</option>';
     }
-  } else if (select) {
-    select.innerHTML = '<option value="">No departments available</option>';
   }
 
   return departmentsCache;
+}
+
+function getSelectedDepartmentValue() {
+  const select = document.getElementById('create-department');
+  return select?.value || departmentsCache[0]?.name || '';
 }
 
 async function loadDashboard() {
@@ -445,7 +469,7 @@ async function loadGrievances() {
 
   tbody.innerHTML = data.grievances.map((grievance) => {
     const statusInfo = formatStatus(grievance.status);
-    const canResolve = ['department_officer', 'collector'].includes(currentUser?.role) && grievance.status === 'open';
+    const canResolve = ['department_officer', 'collector'].includes(currentUser?.role) && ['open', 'in_progress', 'reopened'].includes(grievance.status);
     return `
       <tr>
         <td><strong>${grievance.swagatId}</strong></td>
@@ -466,11 +490,14 @@ async function loadGrievances() {
 async function resolveGrievance(id) {
   const { ok, data } = await api(`/api/grievances/${id}/resolve`, { method: 'POST' });
   if (!ok) {
-    showToast(data.error || 'Unable to mark grievance for verification.', 'error');
+    showToast(data.setupHint || data.error || 'Unable to mark grievance for verification.', 'error');
     return;
   }
 
-  showToast('Grievance moved to verification workflow. A field officer must upload evidence before the citizen IVR call starts.', 'success');
+  showToast(data.ivrCall?.phone
+    ? `Citizen IVR call started for ${data.ivrCall.phone}. Field evidence unlocks after the citizen presses 1.`
+    : data.message || 'Grievance moved to verification workflow.',
+    data.ivrCall?.phone ? 'success' : 'warning');
   loadGrievances();
   if (currentView === 'verification') loadVerificationView();
   if (currentView === 'evidence') loadEvidenceView();
@@ -554,8 +581,14 @@ async function handleCreateGrievance(event) {
     address: document.getElementById('create-address').value.trim(),
     latitude: document.getElementById('create-latitude').value,
     longitude: document.getElementById('create-longitude').value,
-    department: document.getElementById('create-department').value,
+    department: getSelectedDepartmentValue(),
   };
+
+  if (!payload.department) {
+    error.textContent = 'Choose a department before submitting the grievance.';
+    error.style.display = 'block';
+    return;
+  }
 
   button.disabled = true;
   button.textContent = 'Submitting...';
@@ -583,20 +616,38 @@ async function handleCreateGrievance(event) {
 }
 
 async function loadVerificationView() {
-  const [pendingResponse, openResponse] = await Promise.all([
+  const [pendingResponse, openResponse, reopenedResponse] = await Promise.all([
     api('/api/grievances?status=verification_pending&limit=100'),
     api('/api/grievances?status=open&limit=100'),
+    api('/api/grievances?status=reopened&limit=50'),
   ]);
 
   const select = document.getElementById('verify-grievance-select');
+  const box = document.getElementById('verify-detail-box');
   select.innerHTML = '<option value="">Select a grievance</option>';
+  box.style.display = 'none';
+  box.innerHTML = '';
 
-  const items = [
-    ...(pendingResponse.data.grievances || []),
-    ...(openResponse.data.grievances || []),
-  ];
+  const responses = [pendingResponse, openResponse, reopenedResponse];
+  const failedResponse = responses.find((response) => !response.ok);
+  if (failedResponse) {
+    select.innerHTML = '<option value="">Unable to load grievances</option>';
+    box.style.display = 'block';
+    box.innerHTML = `<div class="inline-error" style="display:block;">${failedResponse.data.error || 'Unable to load grievances for verification.'}</div>`;
+    return;
+  }
 
-  items.forEach((grievance) => {
+  const items = responses.flatMap((response) => response.data.grievances || []);
+
+  const uniqueItems = Array.from(new Map(items.map((grievance) => [grievance.id, grievance])).values());
+  if (!uniqueItems.length) {
+    select.innerHTML = '<option value="">No actionable grievances found</option>';
+    box.style.display = 'block';
+    box.innerHTML = '<div class="inline-hint">No open, reopened, or pending-verification grievances are available for your role and department.</div>';
+    return;
+  }
+
+  uniqueItems.forEach((grievance) => {
     const option = document.createElement('option');
     option.value = grievance.id;
     option.textContent = `[${formatStatus(grievance.status).label}] ${grievance.swagatId} - ${grievance.title}`;
@@ -605,7 +656,6 @@ async function loadVerificationView() {
 
   select.onchange = async () => {
     const grievanceId = select.value;
-    const box = document.getElementById('verify-detail-box');
     if (!grievanceId) {
       box.style.display = 'none';
       return;
@@ -626,18 +676,16 @@ async function loadVerificationView() {
       <div class="detail-line"><strong>Citizen phone:</strong> ${grievance.citizen?.phone || '-'}</div>
       <div class="detail-line"><strong>Coordinates:</strong> ${grievance.locationLat}, ${grievance.locationLng}</div>
       <div class="detail-line"><strong>Assigned Officer:</strong> ${grievance.assignedOfficer?.name || 'Pending automatic assignment'}</div>
-      ${grievance.status === 'open' && ['department_officer', 'collector'].includes(currentUser?.role)
-        ? `<div class="detail-line"><button class="primary-button" onclick="resolveAndReload('${grievance.id}')">Mark as Resolved</button></div>`
+      <div class="detail-line"><strong>IVR response:</strong> ${data.verificationLog?.ivrResult || 'Waiting for real IVR response'}</div>
+      <div class="detail-line"><strong>System decision:</strong> ${data.verificationLog?.reason || 'No decision yet'}</div>
+      ${['open', 'in_progress', 'reopened'].includes(grievance.status) && ['department_officer', 'collector'].includes(currentUser?.role)
+        ? `<div class="detail-line"><button class="primary-button" onclick="resolveAndReload('${grievance.id}')">Resolve and Call Citizen</button></div>`
         : ''}
     `;
   };
 
-  ['ivr-result', 'eval-result'].forEach((id) => {
-    const element = document.getElementById(id);
-    element.style.display = 'none';
-    element.className = 'result-card';
-    element.innerHTML = '';
-  });
+  document.getElementById('ivr-result').style.display = 'block';
+  document.getElementById('eval-result').style.display = 'block';
 }
 
 async function resolveAndReload(id) {
@@ -645,32 +693,38 @@ async function resolveAndReload(id) {
   loadVerificationView();
 }
 
-async function simulateIvr(digit) {
-  const grievanceId = document.getElementById('verify-grievance-select').value;
-  if (!grievanceId) {
-    showToast('Select a grievance first.', 'warning');
+async function uploadIvrAudio() {
+  if (currentUser?.role !== 'collector') {
+    showToast('Only the District Collector can upload the system IVR audio prompt.', 'error');
     return;
   }
 
-  const { ok, data } = await api(`/api/grievances/${grievanceId}/simulate-ivr`, {
+  const input = document.getElementById('ivr-audio-file');
+  const status = document.getElementById('ivr-audio-status');
+  const [file] = input?.files || [];
+  if (!file) {
+    showToast('Choose an MP3 or WAV audio file first.', 'warning');
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append('audio', file);
+
+  status.textContent = 'Uploading IVR audio prompt...';
+  const { ok, data } = await api('/api/ivr/audio', {
     method: 'POST',
-    body: JSON.stringify({ digit }),
+    body: formData,
   });
 
-  const panel = document.getElementById('ivr-result');
-  panel.style.display = 'block';
-
   if (!ok) {
-    panel.className = 'result-card error';
-    panel.textContent = data.error || 'Unable to simulate IVR.';
+    status.textContent = data.error || 'Unable to upload IVR audio.';
+    showToast(status.textContent, 'error');
     return;
   }
 
-  const ivrResult = data.verificationLog?.ivrResult || 'pending';
-  const isPositive = ivrResult === 'resolved';
-  panel.className = `result-card ${isPositive ? 'success' : 'warning'}`;
-  panel.innerHTML = `<strong>IVR result:</strong> ${ivrResult}`;
-  showToast(`Citizen response recorded as ${ivrResult}.`, isPositive ? 'success' : 'warning');
+  input.value = '';
+  status.textContent = 'IVR audio prompt uploaded. Future calls will use this pre-recorded prompt.';
+  showToast('IVR audio prompt updated successfully.', 'success');
 }
 
 async function loadEvidenceView() {
@@ -844,7 +898,7 @@ async function submitEvidence() {
   if (!ok && status !== 422) {
     panel.className = 'result-card error';
     panel.innerHTML = `<strong>Upload Failed</strong><br>${data.error || 'Unable to upload evidence.'}`;
-    showToast('Evidence upload failed.', 'error');
+    showToast(data.error || 'Evidence upload failed.', status === 409 ? 'warning' : 'error');
     return;
   }
 
@@ -866,48 +920,20 @@ async function submitEvidence() {
     GPS distance: ${data.distance}m<br>
     Hash: ${data.imageHash}
   `;
-  if (data.ivrCall?.phone) {
-    panel.innerHTML += `<br>Citizen IVR call started for ${data.ivrCall.phone}`;
+  if (data.finalDecision?.finalStatus) {
+    panel.innerHTML += `<br>Final decision: ${formatStatus(data.finalDecision.finalStatus).label}`;
   }
   if (data.evidence) {
     renderEvidenceHistory(data.evidence);
   }
 
   if (data.isValid) {
-    showToast(data.ivrCall?.phone ? 'Evidence passed validation and the citizen IVR call has been started.' : 'Evidence passed photo and GPS validation.', 'success');
+    showToast('Evidence passed photo and GPS validation. Complaint can be marked verified if IVR is satisfied.', 'success');
   } else if (data.verificationStatus === 'suspicious') {
-    showToast(data.ivrCall?.phone ? 'Evidence uploaded, GPS looks suspicious, and the citizen IVR call has been started.' : 'Evidence uploaded, but the GPS location looks suspicious.', 'warning');
+    showToast('Evidence uploaded, but the GPS location looks suspicious.', 'warning');
   } else {
-    showToast(data.ivrCall?.phone ? 'Evidence uploaded, photo validation failed, and the citizen IVR call has been started.' : 'Evidence uploaded, but the photo validation failed.', 'error');
+    showToast('Evidence uploaded, but the photo validation failed.', 'error');
   }
-}
-
-async function runEvaluation() {
-  const grievanceId = document.getElementById('verify-grievance-select').value;
-  if (!grievanceId) {
-    showToast('Select a grievance first.', 'warning');
-    return;
-  }
-
-  const { ok, data } = await api(`/api/grievances/${grievanceId}/evaluate`, { method: 'POST' });
-  const panel = document.getElementById('eval-result');
-  panel.style.display = 'block';
-
-  if (!ok) {
-    panel.className = 'result-card error';
-    panel.textContent = data.error || 'Unable to evaluate verification.';
-    return;
-  }
-
-  const isVerified = data.result?.finalStatus === 'verified';
-  panel.className = `result-card ${isVerified ? 'success' : 'error'}`;
-  panel.innerHTML = `
-    <strong>Final status:</strong> ${formatStatus(data.result?.finalStatus).label}<br>
-    ${data.result?.reason || ''}
-  `;
-  showToast(`Verification completed with status ${formatStatus(data.result?.finalStatus).label}.`, isVerified ? 'success' : 'warning');
-  loadGrievances();
-  loadDashboard();
 }
 
 async function loadDepartments() {
@@ -970,10 +996,21 @@ function renderDepartmentCards(items) {
   }).join('');
 }
 
-document.addEventListener('DOMContentLoaded', async () => {
+export async function initializeLegacyApp() {
+  if (hasInitialized) {
+    return;
+  }
+
+  const themeToggle = document.getElementById('theme-toggle');
+  if (!themeToggle) {
+    requestAnimationFrame(() => initializeLegacyApp());
+    return;
+  }
+
+  hasInitialized = true;
   applyTheme(currentTheme);
 
-  document.getElementById('theme-toggle').addEventListener('click', () => {
+  themeToggle.addEventListener('click', () => {
     applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
   });
 
@@ -984,11 +1021,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  document.getElementById('modal-overlay').addEventListener('click', (event) => {
+  document.getElementById('modal-overlay')?.addEventListener('click', (event) => {
     if (event.target === event.currentTarget) closeModal();
   });
 
-  document.getElementById('create-grievance-overlay').addEventListener('click', (event) => {
+  document.getElementById('create-grievance-overlay')?.addEventListener('click', (event) => {
     if (event.target === event.currentTarget) closeCreateGrievanceModal();
   });
 
@@ -999,7 +1036,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  document.getElementById('evidence-photo').addEventListener('change', (event) => {
+  document.getElementById('evidence-photo')?.addEventListener('change', (event) => {
     const [file] = event.target.files || [];
     if (!file) {
       return;
@@ -1025,7 +1062,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('mock-badge').style.display = 'inline-flex';
   }
   if (!health.ok) {
-    showToast('Backend is not reachable on port 5000.', 'error');
+    showToast(`Backend is not reachable at ${API_BASE}.`, 'error');
   }
 
   if (authToken && currentUser) {
@@ -1033,7 +1070,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   } else {
     showLoginScreen();
   }
-});
+}
 
 Object.assign(window, {
   toggleAuthForm,
@@ -1049,10 +1086,9 @@ Object.assign(window, {
   showCreateGrievanceModal,
   closeCreateGrievanceModal,
   handleCreateGrievance,
-  simulateIvr,
   resolveAndReload,
+  uploadIvrAudio,
   captureEvidenceLocation,
   prefillEvidenceLocation,
   submitEvidence,
-  runEvaluation,
 });

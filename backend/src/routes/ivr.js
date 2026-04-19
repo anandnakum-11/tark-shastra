@@ -1,10 +1,42 @@
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
 const router = require('express').Router();
+const auth = require('../middleware/auth');
+const roleGuard = require('../middleware/roleGuard');
 const VerificationLog = require('../models/VerificationLog');
 const validateTwilio = require('../middleware/validateTwilio');
 const { generateWelcomeTwiml, generateResponseTwiml } = require('../services/ivrService');
 const { CITIZEN_RESPONSE } = require('../utils/constants');
-const { evaluateVerification } = require('../services/verificationEngine');
+const { evaluateVerification, scheduleEvidenceTimeout } = require('../services/verificationEngine');
 const logger = require('../utils/logger');
+
+const ivrUploadsDir = path.join(__dirname, '../../uploads/ivr');
+
+const audioUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, callback) => {
+      fs.mkdirSync(ivrUploadsDir, { recursive: true });
+      callback(null, ivrUploadsDir);
+    },
+    filename: (req, file, callback) => {
+      const ext = path.extname(file.originalname || '').toLowerCase() || '.mp3';
+      callback(null, `ivr-prompt-${Date.now()}${ext}`);
+    },
+  }),
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+    files: 1,
+  },
+  fileFilter: (req, file, callback) => {
+    const allowedTypes = ['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav'];
+    if (!allowedTypes.includes(file.mimetype)) {
+      callback(new Error('Only MP3 and WAV IVR prompt audio files are supported.'));
+      return;
+    }
+    callback(null, true);
+  },
+});
 
 async function getLatestVerificationLog(grievanceId) {
   return VerificationLog.findOne({
@@ -12,6 +44,36 @@ async function getLatestVerificationLog(grievanceId) {
     order: [['created_at', 'DESC']],
   });
 }
+
+router.post('/audio', auth, roleGuard('collector'), audioUpload.single('audio'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'Audio file is required.' });
+  }
+
+  const baseUrl = String(process.env.BASE_URL || '').replace(/\/$/, '');
+  if (!baseUrl) {
+    return res.status(500).json({ error: 'BASE_URL is required before uploading IVR audio.' });
+  }
+
+  const audioUrl = `${baseUrl}/uploads/ivr/${req.file.filename}`;
+  process.env.IVR_AUDIO_URL = audioUrl;
+  logger.info(`IVR prompt audio updated by ${req.user.email}: ${audioUrl}`);
+
+  res.status(201).json({
+    message: 'IVR prompt audio uploaded successfully.',
+    audioUrl,
+  });
+});
+
+router.get('/audio/gj_audio.mp3', (req, res) => {
+  const audioPath = path.join(__dirname, '../../../gj_audio.mp3');
+  if (!fs.existsSync(audioPath)) {
+    return res.status(404).json({ error: 'Gujarati IVR audio file not found.' });
+  }
+
+  res.type('audio/mpeg');
+  res.sendFile(audioPath);
+});
 
 router.post('/welcome', validateTwilio, (req, res) => {
   const { grievanceId } = req.query;
@@ -35,6 +97,10 @@ router.post('/response', validateTwilio, async (req, res) => {
           ? CITIZEN_RESPONSE.DISPUTED
           : CITIZEN_RESPONSE.NO_RESPONSE;
       await verificationLog.save();
+
+      if (verificationLog.ivrResult === CITIZEN_RESPONSE.CONFIRMED) {
+        scheduleEvidenceTimeout(grievanceId);
+      }
     }
 
     try {
@@ -76,6 +142,13 @@ router.post('/status', validateTwilio, async (req, res) => {
     logger.error(`IVR status error: ${err.message}`);
     res.sendStatus(200);
   }
+});
+
+router.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError || err.message) {
+    return res.status(400).json({ error: err.message });
+  }
+  next(err);
 });
 
 module.exports = router;

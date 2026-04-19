@@ -6,6 +6,15 @@ const roleGuard = require('../middleware/roleGuard');
 const { GRIEVANCE_STATUS, USER_ROLES } = require('../utils/constants');
 const logger = require('../utils/logger');
 
+const VALID_CATEGORIES = new Set(['road', 'water', 'sanitation', 'electricity', 'drainage', 'street_light', 'garbage', 'other']);
+const VALID_PRIORITIES = new Set(['low', 'medium', 'high', 'critical']);
+const RESOLVABLE_STATUSES = new Set([
+  GRIEVANCE_STATUS.OPEN,
+  GRIEVANCE_STATUS.IN_PROGRESS,
+  GRIEVANCE_STATUS.REOPENED,
+  GRIEVANCE_STATUS.RESOLVED,
+]);
+
 function buildGrievanceCode(grievance) {
   return `SG-${String(grievance.id).split('-')[0].toUpperCase()}`;
 }
@@ -27,26 +36,42 @@ async function getLatestVerificationLog(grievanceId) {
   });
 }
 
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, roleGuard('citizen'), async (req, res) => {
   try {
     const { title, description, category, address, latitude, longitude, department, priority } = req.body;
+    const parsedLatitude = Number(latitude);
+    const parsedLongitude = Number(longitude);
+    const normalizedCategory = String(category || 'other').trim().toLowerCase();
+    const normalizedPriority = String(priority || 'medium').trim().toLowerCase();
 
     if (!title || !description || !address || latitude == null || longitude == null || !department) {
       return res.status(400).json({
         error: 'Missing required fields: title, description, address, latitude, longitude, department',
       });
     }
+    if (!Number.isFinite(parsedLatitude) || !Number.isFinite(parsedLongitude)) {
+      return res.status(400).json({ error: 'Latitude and longitude must be valid numbers.' });
+    }
+    if (parsedLatitude < -90 || parsedLatitude > 90 || parsedLongitude < -180 || parsedLongitude > 180) {
+      return res.status(400).json({ error: 'Latitude or longitude is outside the valid GPS range.' });
+    }
+    if (!VALID_CATEGORIES.has(normalizedCategory)) {
+      return res.status(400).json({ error: 'Invalid grievance category.' });
+    }
+    if (!VALID_PRIORITIES.has(normalizedPriority)) {
+      return res.status(400).json({ error: 'Invalid grievance priority.' });
+    }
 
     const grievance = await Grievance.create({
       citizenId: req.user.id,
       title: String(title).trim(),
       description: String(description).trim(),
-      category: String(category || 'other').trim().toLowerCase(),
+      category: normalizedCategory,
       address: String(address).trim(),
-      locationLat: parseFloat(latitude),
-      locationLng: parseFloat(longitude),
+      locationLat: parsedLatitude,
+      locationLng: parsedLongitude,
       department: String(department).trim(),
-      priority: String(priority || 'medium').trim().toLowerCase(),
+      priority: normalizedPriority,
       status: GRIEVANCE_STATUS.OPEN,
     });
 
@@ -141,6 +166,15 @@ router.post('/:id/resolve', auth, roleGuard('department_officer', 'collector'), 
       return res.status(409).json({ error: 'Grievance is already verified.', status: grievance.status });
     }
 
+    if (!RESOLVABLE_STATUSES.has(grievance.status)) {
+      return res.status(409).json({
+        error: `Grievance cannot be resolved from status "${grievance.status}".`,
+        status: grievance.status,
+      });
+    }
+
+    const previousStatus = grievance.status;
+    const previousResolvedAt = grievance.resolvedAt;
     grievance.status = GRIEVANCE_STATUS.PENDING_VERIFICATION;
     grievance.resolvedAt = new Date();
     if (!grievance.assignedOfficerId) {
@@ -163,11 +197,35 @@ router.post('/:id/resolve', auth, roleGuard('department_officer', 'collector'), 
       status: 'pending',
     });
 
+    let ivrCall = null;
+    try {
+      const { triggerCitizenVerificationCall } = require('../services/verificationEngine');
+      ivrCall = await triggerCitizenVerificationCall(grievance.id);
+    } catch (callErr) {
+      grievance.status = previousStatus;
+      grievance.resolvedAt = previousResolvedAt;
+      await grievance.save();
+      verificationLog.status = 'failed';
+      verificationLog.reason = `Unable to start citizen IVR call: ${callErr.message}`;
+      await verificationLog.save();
+      logger.warn(`IVR trigger failed for grievance ${grievance.id}: ${callErr.message}`);
+      return res.status(502).json({
+        error: verificationLog.reason,
+        setupHint: 'For a real call, run ngrok for backend port 5001 and set PUBLIC_BASE_URL=https://your-ngrok-domain. For local-only testing, set MOCK_MODE=true.',
+        status: grievance.status,
+        grievance: formatGrievance(grievance),
+        verificationLog,
+      });
+    }
+
     logger.info(`Grievance ${grievance.id} moved to verification_pending by ${req.user.email}`);
     res.status(202).json({
       status: grievance.status,
-      jobId: null,
-      message: 'Grievance marked for verification. Field evidence is now required before the citizen IVR call is triggered.',
+      jobId: ivrCall?.callSid || null,
+      ivrCall,
+      message: ivrCall
+        ? 'Citizen IVR confirmation started. If the citizen presses 1, the field officer evidence task can proceed.'
+        : 'Grievance marked for verification, but citizen IVR could not be started. Please check the citizen phone number or Twilio configuration.',
       grievance: formatGrievance(grievance),
       verificationLog,
       assignedOfficerId: grievance.assignedOfficerId || null,
@@ -179,6 +237,10 @@ router.post('/:id/resolve', auth, roleGuard('department_officer', 'collector'), 
 });
 
 router.post('/:id/simulate-ivr', auth, async (req, res) => {
+  if (process.env.MOCK_MODE !== 'true') {
+    return res.status(403).json({ error: 'Manual IVR simulation is disabled in real IVR mode.' });
+  }
+
   try {
     const { digit } = req.body;
     const grievance = await Grievance.findByPk(req.params.id);
@@ -208,7 +270,12 @@ router.post('/:id/simulate-ivr', auth, async (req, res) => {
     }
 
     logger.info(`[SIMULATE] IVR response for grievance ${grievance.id}: ${verificationLog.ivrResult}`);
-    res.json({ message: `Simulated IVR response: ${verificationLog.ivrResult}`, verificationLog });
+    const updatedGrievance = await Grievance.findByPk(grievance.id);
+    res.json({
+      message: `Simulated IVR response: ${verificationLog.ivrResult}`,
+      verificationLog,
+      status: updatedGrievance?.status,
+    });
   } catch (err) {
     logger.error(`Simulate IVR error: ${err.message}`);
     res.status(500).json({ error: err.message });
@@ -216,6 +283,10 @@ router.post('/:id/simulate-ivr', auth, async (req, res) => {
 });
 
 router.post('/:id/evaluate', auth, async (req, res) => {
+  if (process.env.MOCK_MODE !== 'true') {
+    return res.status(403).json({ error: 'Manual verification evaluation is disabled in real IVR mode.' });
+  }
+
   try {
     const { evaluateVerification } = require('../services/verificationEngine');
     const result = await evaluateVerification(req.params.id);

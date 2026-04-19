@@ -1,1 +1,9 @@
 /POSTGRESQL_SETUP.md
+/backend/.env
+/.env
+/.codex-run
+/frontend/node_modules
+/frontend/dist
+/backend/uploads
+/backend/tmp-test-images
+/backend/backend_start.log

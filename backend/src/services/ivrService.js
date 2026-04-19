@@ -1,60 +1,68 @@
 const VoiceResponse = require('twilio').twiml.VoiceResponse;
+const { getTwilioWebhookBaseUrl } = require('../config/twilio');
 
-/**
- * Generate TwiML for the IVR welcome prompt in Gujarati.
- */
+const VOICE_OPTIONS = {
+  language: 'gu-IN',
+  voice: 'Google.gu-IN-Standard-A',
+};
+
+function say(twiml, text) {
+  twiml.say(VOICE_OPTIONS, text);
+}
+
+function getPromptAudioUrl() {
+  if (process.env.IVR_AUDIO_URL) {
+    return process.env.IVR_AUDIO_URL;
+  }
+
+  const baseUrl = getTwilioWebhookBaseUrl();
+  return baseUrl ? `${baseUrl}/api/ivr/audio/gj_audio.mp3` : '';
+}
+
+function buildWebhookUrl(path) {
+  const baseUrl = getTwilioWebhookBaseUrl();
+  return baseUrl ? `${baseUrl}${path}` : path;
+}
+
 function generateWelcomeTwiml(grievanceId) {
   const twiml = new VoiceResponse();
 
   const gather = twiml.gather({
     numDigits: 1,
-    action: `/api/ivr/response?grievanceId=${grievanceId}`,
+    action: buildWebhookUrl(`/api/ivr/response?grievanceId=${encodeURIComponent(grievanceId)}`),
     method: 'POST',
     timeout: 10,
     language: 'gu-IN',
+    actionOnEmptyResult: true,
   });
 
-  gather.say({
-    language: 'gu-IN',
-    voice: 'Google.gu-IN-Standard-A',
-  }, `નમસ્તે. આ સાક્ષ્ય એ.આઈ. ગ્રિવન્સ વેરિફિકેશન સિસ્ટમ તરફથી કૉલ છે. ` +
-     `તમારી ફરિયાદ ની ચકાસણી માટે, ` +
-     `જો સમસ્યા ઉકેલાઈ ગઈ હોય, તો 1 દબાવો. ` +
-     `જો સમસ્યા હજુ પણ ચાલુ છે, તો 2 દબાવો.`);
+  const promptAudioUrl = getPromptAudioUrl();
+  if (promptAudioUrl) {
+    gather.play(promptAudioUrl);
+  } else {
+    say(
+      gather,
+      'નમસ્તે. આ સક્ષ્ય એ આઈ ફરિયાદ ચકાસણી સિસ્ટમ તરફથી કોલ છે. જો તમારી ફરિયાદ સંતોષકારક રીતે ઉકેલાઈ ગઈ હોય તો એક દબાવો. જો સમસ્યા હજુ ચાલુ હોય તો બે દબાવો.'
+    );
+  }
 
-  // If no input, say message and hang up
-  twiml.say({
-    language: 'gu-IN',
-    voice: 'Google.gu-IN-Standard-A',
-  }, 'કોઈ ઇનપુટ મળ્યું નથી. ફરિયાદ ફરીથી ખોલવામાં આવશે. આભાર.');
+  say(twiml, 'કોઈ જવાબ મળ્યો નથી. ફરિયાદ ફરીથી ખોલવામાં આવશે. આભાર.');
 
   return twiml.toString();
 }
 
-/**
- * Generate TwiML response after user presses a digit.
- */
 function generateResponseTwiml(digit) {
   const twiml = new VoiceResponse();
 
   if (digit === '1') {
-    twiml.say({
-      language: 'gu-IN',
-      voice: 'Google.gu-IN-Standard-A',
-    }, 'આભાર. તમારો પ્રતિસાદ નોંધવામાં આવ્યો છે. ફરિયાદ ચકાસણી પૂર્ણ થશે. નમસ્તે.');
+    say(twiml, 'આભાર. તમારો પ્રતિસાદ નોંધવામાં આવ્યો છે. હવે ફિલ્ડ વેરિફિકેશન પછી ફરિયાદ બંધ કરવામાં આવશે. નમસ્તે.');
   } else if (digit === '2') {
-    twiml.say({
-      language: 'gu-IN',
-      voice: 'Google.gu-IN-Standard-A',
-    }, 'આભાર. તમારો વિવાદ નોંધવામાં આવ્યો છે. ફરિયાદ ફરીથી ખોલવામાં આવશે. નમસ્તે.');
+    say(twiml, 'આભાર. તમારો વિવાદ નોંધવામાં આવ્યો છે. ફરિયાદ ફરીથી ખોલવામાં આવશે. નમસ્તે.');
   } else {
-    twiml.say({
-      language: 'gu-IN',
-      voice: 'Google.gu-IN-Standard-A',
-    }, 'અમાન્ય ઇનપુટ. ફરિયાદ ફરીથી ખોલવામાં આવશે. નમસ્તે.');
+    say(twiml, 'અમાન્ય જવાબ મળ્યો છે. ફરિયાદ ફરીથી ખોલવામાં આવશે. નમસ્તે.');
   }
 
   return twiml.toString();
 }
 
-module.exports = { generateWelcomeTwiml, generateResponseTwiml };
+module.exports = { generateWelcomeTwiml, generateResponseTwiml, getPromptAudioUrl, buildWebhookUrl };
