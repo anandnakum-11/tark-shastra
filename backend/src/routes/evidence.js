@@ -1,60 +1,77 @@
+const path = require('path');
+const multer = require('multer');
 const router = require('express').Router();
 const auth = require('../middleware/auth');
 const roleGuard = require('../middleware/roleGuard');
 const Evidence = require('../models/Evidence');
-const { getUploadUrl, confirmEvidenceUpload } = require('../services/evidenceService');
+const { confirmEvidenceUpload } = require('../services/evidenceService');
+const { triggerCitizenVerificationCall } = require('../services/verificationEngine');
 const logger = require('../utils/logger');
 
-// ── GET /api/evidence/upload-url — Generate presigned S3 upload URL ──
-router.get('/upload-url', auth, roleGuard('OFFICER'), async (req, res) => {
-  try {
-    const { grievanceId, fileName, fileType } = req.query;
-    if (!grievanceId || !fileName) {
-      return res.status(400).json({ error: 'grievanceId and fileName are required.' });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 8 * 1024 * 1024,
+    files: 1,
+  },
+  fileFilter: (req, file, callback) => {
+    const allowed = ['image/jpeg', 'image/jpg', 'image/png'];
+    if (!allowed.includes(file.mimetype)) {
+      callback(new Error('Only JPEG and PNG photos are supported.'));
+      return;
     }
-
-    const result = await getUploadUrl(grievanceId, fileName, fileType || 'image/jpeg');
-    res.json(result);
-  } catch (err) {
-    logger.error(`Upload URL error: ${err.message}`);
-    res.status(500).json({ error: err.message });
-  }
+    callback(null, true);
+  },
 });
 
-// ── POST /api/evidence/confirm — Confirm upload + GPS coords ──
-router.post('/confirm', auth, roleGuard('OFFICER'), async (req, res) => {
+router.post('/upload', auth, roleGuard('field_officer', 'collector'), upload.single('photo'), async (req, res) => {
   try {
-    const { grievanceId, imageKey, latitude, longitude } = req.body;
-
-    if (!grievanceId || !imageKey || latitude == null || longitude == null) {
-      return res.status(400).json({ error: 'grievanceId, imageKey, latitude, and longitude are required.' });
+    const { grievanceId, latitude, longitude, timestamp } = req.body;
+    if (!grievanceId || latitude == null || longitude == null || !timestamp) {
+      return res.status(400).json({ error: 'grievanceId, latitude, longitude, timestamp, and photo are required.' });
     }
 
     const result = await confirmEvidenceUpload({
       grievanceId,
-      imageKey,
+      file: req.file,
       latitude: parseFloat(latitude),
       longitude: parseFloat(longitude),
-      userId: req.user._id,
+      timestamp,
+      userId: req.user.id,
     });
 
-    res.status(201).json(result);
+    let ivrCall = null;
+    try {
+      ivrCall = await triggerCitizenVerificationCall(grievanceId);
+    } catch (callErr) {
+      logger.warn(`IVR trigger after evidence upload failed for grievance ${grievanceId}: ${callErr.message}`);
+    }
+
+    result.ivrCall = ivrCall;
+    res.status(result.isValid ? 201 : 422).json(result);
   } catch (err) {
-    logger.error(`Evidence confirm error: ${err.message}`);
+    logger.error(`Evidence upload error: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── GET /api/evidence/:grievanceId — Get evidence for a grievance ──
 router.get('/:grievanceId', auth, async (req, res) => {
   try {
-    const evidence = await Evidence.find({ grievance: req.params.grievanceId })
-      .populate('uploadedBy', 'name username')
-      .sort({ createdAt: -1 });
+    const evidence = await Evidence.findAll({
+      where: { grievanceId: req.params.grievanceId },
+      order: [['timestamp', 'DESC']],
+    });
     res.json({ evidence });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+router.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError || err.message) {
+    return res.status(400).json({ error: err.message });
+  }
+  next(err);
 });
 
 module.exports = router;

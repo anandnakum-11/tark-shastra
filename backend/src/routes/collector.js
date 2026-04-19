@@ -1,21 +1,21 @@
 const router = require('express').Router();
+const { Grievance, VerificationLog, FieldEvidence, User, Department } = require('../models');
 const auth = require('../middleware/auth');
 const roleGuard = require('../middleware/roleGuard');
 const { getCollectorDashboard, getFailedVerifications } = require('../services/scoreService');
-const VerificationLog = require('../models/VerificationLog');
-const Grievance = require('../models/Grievance');
+const { GRIEVANCE_STATUS } = require('../utils/constants');
 
-// ── GET /api/collector/dashboard — Aggregated stats for Collector ──
-router.get('/dashboard', auth, roleGuard('COLLECTOR'), async (req, res) => {
+router.get('/dashboard', auth, roleGuard('collector'), async (req, res) => {
   try {
     const departments = await getCollectorDashboard();
 
-    // Overall stats
-    const totalGrievances = await Grievance.countDocuments();
-    const totalOpen = await Grievance.countDocuments({ status: 'OPEN' });
-    const totalPending = await Grievance.countDocuments({ status: 'PENDING_VERIFICATION' });
-    const totalClosed = await Grievance.countDocuments({ status: 'CLOSED' });
-    const totalReopened = await Grievance.countDocuments({ status: 'REOPENED' });
+    const [totalGrievances, totalOpen, totalPending, totalClosed, totalReopened] = await Promise.all([
+      Grievance.count(),
+      Grievance.count({ where: { status: GRIEVANCE_STATUS.OPEN } }),
+      Grievance.count({ where: { status: GRIEVANCE_STATUS.PENDING_VERIFICATION } }),
+      Grievance.count({ where: { status: GRIEVANCE_STATUS.CLOSED } }),
+      Grievance.count({ where: { status: GRIEVANCE_STATUS.REOPENED } }),
+    ]);
 
     res.json({
       overview: {
@@ -32,14 +32,13 @@ router.get('/dashboard', auth, roleGuard('COLLECTOR'), async (req, res) => {
   }
 });
 
-// ── GET /api/collector/failed/:departmentId — Drill down into failed verifications ──
-router.get('/failed/:departmentId', auth, roleGuard('COLLECTOR'), async (req, res) => {
+router.get('/failed/:departmentId', auth, roleGuard('collector'), async (req, res) => {
   try {
     const { page, limit } = req.query;
     const result = await getFailedVerifications(
       req.params.departmentId,
-      parseInt(page) || 1,
-      parseInt(limit) || 20
+      parseInt(page, 10) || 1,
+      parseInt(limit, 10) || 20
     );
     res.json(result);
   } catch (err) {
@@ -47,33 +46,45 @@ router.get('/failed/:departmentId', auth, roleGuard('COLLECTOR'), async (req, re
   }
 });
 
-// ── GET /api/collector/audit/:grievanceId — Full audit packet ──
-router.get('/audit/:grievanceId', auth, roleGuard('COLLECTOR'), async (req, res) => {
+router.get('/audit/:grievanceId', auth, roleGuard('collector'), async (req, res) => {
   try {
-    const grievance = await Grievance.findById(req.params.grievanceId)
-      .populate('department', 'name code')
-      .populate('complainant', 'name phone')
-      .populate('assignedOfficer', 'name phone');
+    const grievance = await Grievance.findByPk(req.params.grievanceId, {
+      include: [
+        { model: User, as: 'citizen', attributes: ['id', 'name', 'email', 'phone'] },
+        { model: User, as: 'assignedOfficer', attributes: ['id', 'name', 'email', 'phone'] },
+      ],
+    });
 
-    if (!grievance) return res.status(404).json({ error: 'Grievance not found' });
+    if (!grievance) {
+      return res.status(404).json({ error: 'Grievance not found' });
+    }
 
-    const verificationLogs = await VerificationLog.find({ grievance: grievance._id })
-      .sort({ createdAt: -1 });
+    const verificationLogs = await VerificationLog.findAll({
+      where: { grievanceId: grievance.id },
+      order: [['created_at', 'DESC']],
+    });
 
-    const Evidence = require('../models/Evidence');
-    const evidence = await Evidence.find({ grievance: grievance._id })
-      .populate('uploadedBy', 'name username')
-      .sort({ createdAt: -1 });
+    const evidence = await FieldEvidence.findAll({
+      where: { grievanceId: grievance.id },
+      order: [['timestamp', 'DESC']],
+    });
+
+    const department = grievance.department
+      ? await Department.findOne({ where: { name: grievance.department } })
+      : null;
 
     res.json({
-      grievance,
+      grievance: {
+        ...grievance.toJSON(),
+        departmentMeta: department,
+      },
       verificationLogs,
       evidence,
       auditPacket: {
         hasPhoto: evidence.length > 0,
-        hasGps: evidence.some(e => e.latitude && e.longitude),
-        hasVoiceLog: verificationLogs.some(v => v.ivrCallSid),
-        isComplete: evidence.length > 0 && verificationLogs.length > 0 && verificationLogs[0].citizenResponse !== 'PENDING',
+        hasGps: evidence.some((item) => item.lat && item.lng),
+        hasVoiceLog: verificationLogs.some((item) => item.ivrResult),
+        isComplete: evidence.length > 0 && verificationLogs.some((item) => item.status !== 'pending'),
       },
     });
   } catch (err) {

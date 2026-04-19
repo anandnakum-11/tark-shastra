@@ -55,9 +55,9 @@ const DepartmentScore = sequelize.define('DepartmentScore', {
 
 // Method to recalculate score
 DepartmentScore.prototype.recalculateScore = function () {
-  const total = this.resolvedCount + this.reopenedCount;
+  const total = this.verifiedCount + this.reopenedCount;
   this.score = total > 0
-    ? Math.round((this.resolvedCount / total) * 100 * 10) / 10
+    ? Math.round((this.verifiedCount / total) * 100 * 10) / 10
     : 0;
   return this.score;
 };

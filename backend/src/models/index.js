@@ -3,22 +3,23 @@ const Grievance = require('./Grievance');
 const FieldEvidence = require('./Evidence');
 const VerificationLog = require('./VerificationLog');
 const DepartmentScore = require('./DepartmentScore');
+const Department = require('./Department');
 
 // Define associations
-Grievance.belongsTo(User, { as: 'citizen', foreignKey: 'citizen_id' });
-Grievance.belongsTo(User, { as: 'assignedOfficer', foreignKey: 'assigned_officer_id' });
+Grievance.belongsTo(User, { as: 'citizen', foreignKey: 'citizenId' });
+Grievance.belongsTo(User, { as: 'assignedOfficer', foreignKey: 'assignedOfficerId' });
 
-FieldEvidence.belongsTo(Grievance, { foreignKey: 'grievance_id' });
-FieldEvidence.belongsTo(User, { foreignKey: 'officer_id' });
+FieldEvidence.belongsTo(Grievance, { foreignKey: 'grievanceId' });
+FieldEvidence.belongsTo(User, { foreignKey: 'officerId' });
 
-VerificationLog.belongsTo(Grievance, { foreignKey: 'grievance_id' });
-VerificationLog.belongsTo(FieldEvidence, { foreignKey: 'evidence_id' });
+VerificationLog.belongsTo(Grievance, { foreignKey: 'grievanceId' });
+VerificationLog.belongsTo(FieldEvidence, { foreignKey: 'evidenceId' });
 
 // Reverse associations
-User.hasMany(Grievance, { foreignKey: 'citizen_id' });
-User.hasMany(FieldEvidence, { foreignKey: 'officer_id' });
-Grievance.hasMany(FieldEvidence, { foreignKey: 'grievance_id' });
-Grievance.hasMany(VerificationLog, { foreignKey: 'grievance_id' });
+User.hasMany(Grievance, { foreignKey: 'citizenId' });
+User.hasMany(FieldEvidence, { foreignKey: 'officerId' });
+Grievance.hasMany(FieldEvidence, { foreignKey: 'grievanceId' });
+Grievance.hasMany(VerificationLog, { foreignKey: 'grievanceId' });
 
 module.exports = {
   User,
@@ -26,4 +27,5 @@ module.exports = {
   FieldEvidence,
   VerificationLog,
   DepartmentScore,
+  Department,
 };

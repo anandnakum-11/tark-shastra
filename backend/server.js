@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const path = require('path');
 const { connectDB } = require('./src/config/db');
 const { connectRedis } = require('./src/config/redis');
 const logger = require('./src/utils/logger');
@@ -15,6 +16,7 @@ app.use(helmet());
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // ── Rate Limiting ────────────────────────────────────
 const limiter = rateLimit({
@@ -32,6 +34,7 @@ app.use('/api/grievances', require('./src/routes/grievance'));
 app.use('/api/ivr', require('./src/routes/ivr'));
 app.use('/api/evidence', require('./src/routes/evidence'));
 app.use('/api/departments', require('./src/routes/department'));
+app.use('/api/actions', require('./src/routes/actions'));
 app.use('/api/collector', require('./src/routes/collector'));
 
 // ── Health Check ─────────────────────────────────────
@@ -56,7 +59,7 @@ app.use((err, req, res, next) => {
 });
 
 // ── Boot ─────────────────────────────────────────────
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 
 async function boot() {
   try {

@@ -13,7 +13,7 @@ function getTwilioClient() {
 }
 
 async function makeIvrCall(toPhone, grievanceId) {
-  const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
+  const baseUrl = process.env.BASE_URL || 'http://localhost:5000';
   const url = `${baseUrl}/api/ivr/welcome?grievanceId=${grievanceId}`;
   const statusCallback = `${baseUrl}/api/ivr/status?grievanceId=${grievanceId}`;
 

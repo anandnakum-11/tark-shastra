@@ -87,9 +87,3 @@ const Grievance = sequelize.define('Grievance', {
 });
 
 module.exports = Grievance;
-
-// 2dsphere index for GPS queries
-grievanceSchema.index({ location: '2dsphere' });
-grievanceSchema.index({ status: 1, department: 1 });
-
-module.exports = mongoose.model('Grievance', grievanceSchema);

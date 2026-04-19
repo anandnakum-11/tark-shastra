@@ -1,145 +1,363 @@
-/* ================================================================
-   SakshyaAI – Frontend Application Logic
-   ================================================================ */
+const API_BASE = 'http://localhost:5000';
 
-const API_BASE = 'http://localhost:3000';
-let authToken = localStorage.getItem('sakshyaai_token');
-let currentUser = JSON.parse(localStorage.getItem('sakshyaai_user') || 'null');
-let currentView = 'dashboard';
-
-// ── API Helper ──────────────────────────────────
-async function api(path, options = {}) {
-  const url = `${API_BASE}${path}`;
-  const headers = { 'Content-Type': 'application/json', ...options.headers };
-  if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
-
+function safeParseJson(value) {
   try {
-    const res = await fetch(url, { ...options, headers });
-    const data = await res.json().catch(() => ({}));
-    return { status: res.status, ok: res.ok, data };
-  } catch (err) {
-    return { status: 0, ok: false, data: { error: `Network error: ${err.message}` } };
+    return value ? JSON.parse(value) : null;
+  } catch (error) {
+    localStorage.removeItem('sakshyaai_user');
+    return null;
   }
 }
 
-// ── Toast Notifications ─────────────────────────
+let authToken = localStorage.getItem('sakshyaai_token');
+let currentUser = safeParseJson(localStorage.getItem('sakshyaai_user'));
+let currentView = 'dashboard';
+let currentTheme = localStorage.getItem('sakshyaai_theme') || 'light';
+let departmentsCache = [];
+let evidenceCaptureFile = null;
+let evidenceCapturedAt = null;
+let evidencePreviewUrl = null;
+let evidenceGpsCaptured = false;
+let authResetInFlight = false;
+
+const VIEW_ACCESS = {
+  citizen: ['dashboard', 'grievances'],
+  field_officer: ['dashboard', 'grievances', 'evidence'],
+  department_officer: ['dashboard', 'grievances', 'verification'],
+  collector: ['dashboard', 'grievances', 'verification', 'evidence', 'departments'],
+};
+
+const DEFAULT_VIEW_BY_ROLE = {
+  citizen: 'grievances',
+  field_officer: 'evidence',
+  department_officer: 'verification',
+  collector: 'dashboard',
+};
+
+const STATUS_META = {
+  open: { label: 'Open', className: 'status-open' },
+  in_progress: { label: 'In Progress', className: 'status-in_progress' },
+  resolved: { label: 'Resolved', className: 'status-resolved' },
+  verification_pending: { label: 'Pending Verification', className: 'status-verification_pending' },
+  verified: { label: 'Verified', className: 'status-verified' },
+  reopened: { label: 'Reopened', className: 'status-reopened' },
+};
+
+const ROLE_LABELS = {
+  citizen: 'Citizen',
+  field_officer: 'Field Officer',
+  department_officer: 'Department Officer',
+  collector: 'Collector',
+};
+
+async function api(path, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  const isFormData = options.body instanceof FormData;
+
+  if (!isFormData && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`;
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
+    const data = await response.json().catch(() => ({}));
+
+    if (response.status === 401 && authToken) {
+      clearAuthSession(false);
+      if (!authResetInFlight) {
+        authResetInFlight = true;
+        showToast('Your session expired. Please sign in again.', 'warning');
+        showLoginScreen();
+        setTimeout(() => {
+          authResetInFlight = false;
+        }, 300);
+      }
+    }
+
+    return { ok: response.ok, status: response.status, data };
+  } catch (error) {
+    return { ok: false, status: 0, data: { error: `Network error: ${error.message}` } };
+  }
+}
+
 function showToast(message, type = 'info') {
-  const container = document.getElementById('toast-container');
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
   toast.textContent = message;
-  container.appendChild(toast);
+  document.getElementById('toast-container').appendChild(toast);
+
   setTimeout(() => {
     toast.style.opacity = '0';
-    toast.style.transform = 'translateX(30px)';
-    toast.style.transition = '0.3s ease';
-    setTimeout(() => toast.remove(), 300);
-  }, 4000);
+    toast.style.transform = 'translateY(8px)';
+    toast.style.transition = 'all 0.25s ease';
+    setTimeout(() => toast.remove(), 250);
+  }, 3200);
 }
 
-// ── Auth ─────────────────────────────────────────
 function fillCreds(username, password) {
   document.getElementById('login-username').value = username;
   document.getElementById('login-password').value = password;
 }
 
-async function handleLogin(e) {
-  e.preventDefault();
-  const username = document.getElementById('login-username').value;
-  const password = document.getElementById('login-password').value;
-  const errorEl = document.getElementById('login-error');
-  const btn = document.getElementById('login-btn');
+function roleLabel(role) {
+  return ROLE_LABELS[role] || role || 'User';
+}
 
-  btn.textContent = 'Signing in...';
-  btn.disabled = true;
+function getAllowedViews() {
+  return VIEW_ACCESS[currentUser?.role] || ['dashboard'];
+}
+
+function getDefaultView() {
+  return DEFAULT_VIEW_BY_ROLE[currentUser?.role] || 'dashboard';
+}
+
+function canAccessView(view) {
+  return getAllowedViews().includes(view);
+}
+
+function applyRoleVisibility() {
+  const allowedViews = new Set(getAllowedViews());
+
+  document.querySelectorAll('.nav-link').forEach((link) => {
+    const isAllowed = allowedViews.has(link.dataset.view);
+    link.style.display = isAllowed ? 'inline-flex' : 'none';
+  });
+
+  const newGrievanceButton = document.getElementById('new-grievance-btn');
+  if (newGrievanceButton) {
+    newGrievanceButton.style.display = currentUser?.role === 'citizen' ? 'inline-flex' : 'none';
+  }
+}
+
+function formatStatus(status) {
+  return STATUS_META[status] || { label: status || 'Unknown', className: '' };
+}
+
+function categoryLabel(category) {
+  return String(category || 'other')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatDepartmentName(value) {
+  return value || 'Unassigned';
+}
+
+function scoreColor(score) {
+  if (score >= 80) return 'var(--success)';
+  if (score >= 50) return 'var(--warn)';
+  return 'var(--danger)';
+}
+
+function toggleAuthForm(event) {
+  event?.preventDefault();
+  const loginForm = document.getElementById('login-form');
+  const registerForm = document.getElementById('register-form');
+  const showingLogin = loginForm.style.display !== 'none';
+
+  loginForm.style.display = showingLogin ? 'none' : 'grid';
+  registerForm.style.display = showingLogin ? 'grid' : 'none';
+  document.getElementById('auth-form-title').textContent = showingLogin ? 'Create Account' : 'Sign In';
+  document.getElementById('auth-form-subtitle').textContent = showingLogin
+    ? 'Create a new account and start tracking grievances.'
+    : 'Enter your credentials to access the portal.';
+  document.getElementById('toggle-text').innerHTML = showingLogin
+    ? 'Already have an account? <a href="#" onclick="toggleAuthForm(event)">Sign in here</a>'
+    : 'Don\'t have an account? <a href="#" onclick="toggleAuthForm(event)">Sign up here</a>';
+}
+
+async function handleLogin(event) {
+  event.preventDefault();
+
+  const username = document.getElementById('login-username').value.trim();
+  const password = document.getElementById('login-password').value;
+  const button = document.getElementById('login-btn');
+  const error = document.getElementById('login-error');
+
+  button.disabled = true;
+  button.textContent = 'Signing In...';
 
   const { ok, data } = await api('/api/auth/login', {
     method: 'POST',
     body: JSON.stringify({ username, password }),
   });
 
-  if (ok) {
-    authToken = data.token;
-    currentUser = data.user;
-    localStorage.setItem('sakshyaai_token', authToken);
-    localStorage.setItem('sakshyaai_user', JSON.stringify(currentUser));
-    errorEl.style.display = 'none';
-    showToast(`Welcome, ${currentUser.name}!`, 'success');
-    initApp();
-  } else {
-    errorEl.textContent = data.error || 'Login failed';
-    errorEl.style.display = 'block';
+  if (!ok) {
+    error.textContent = data.error || 'Login failed.';
+    error.style.display = 'block';
+    button.disabled = false;
+    button.textContent = 'Sign In';
+    return;
   }
 
-  btn.textContent = 'Sign In';
-  btn.disabled = false;
+  authToken = data.token;
+  currentUser = data.user;
+  localStorage.setItem('sakshyaai_token', authToken);
+  localStorage.setItem('sakshyaai_user', JSON.stringify(currentUser));
+  error.style.display = 'none';
+  button.disabled = false;
+  button.textContent = 'Sign In';
+  showToast(`Welcome back, ${currentUser.name}.`, 'success');
+  initApp();
 }
 
-function logout() {
+async function handleRegister(event) {
+  event.preventDefault();
+
+  const payload = {
+    name: document.getElementById('register-name').value.trim(),
+    username: document.getElementById('register-email').value.trim(),
+    phone: document.getElementById('register-phone').value.trim(),
+    role: document.getElementById('register-role').value,
+    department: document.getElementById('register-department').value.trim(),
+    password: document.getElementById('register-password').value,
+  };
+
+  const button = document.getElementById('register-btn');
+  const error = document.getElementById('register-error');
+
+  button.disabled = true;
+  button.textContent = 'Creating Account...';
+
+  const { ok, data } = await api('/api/auth/register', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+
+  if (!ok) {
+    error.textContent = data.error || 'Registration failed.';
+    error.style.display = 'block';
+    button.disabled = false;
+    button.textContent = 'Create Account';
+    return;
+  }
+
+  authToken = data.token;
+  currentUser = data.user;
+  localStorage.setItem('sakshyaai_token', authToken);
+  localStorage.setItem('sakshyaai_user', JSON.stringify(currentUser));
+  error.style.display = 'none';
+  button.disabled = false;
+  button.textContent = 'Create Account';
+  showToast('Account created successfully.', 'success');
+  initApp();
+}
+
+function applyTheme(theme) {
+  currentTheme = theme;
+  document.documentElement.setAttribute('data-theme', theme === 'dark' ? 'dark' : 'light');
+  localStorage.setItem('sakshyaai_theme', currentTheme);
+
+  const icon = document.getElementById('theme-toggle-icon');
+  const label = document.getElementById('theme-toggle-label');
+  if (icon) icon.textContent = currentTheme === 'dark' ? 'Moon' : 'Sun';
+  if (label) label.textContent = currentTheme === 'dark' ? 'Dark' : 'Light';
+}
+
+function showLoginScreen() {
+  document.querySelectorAll('.view').forEach((view) => {
+    view.style.display = 'none';
+  });
+  document.getElementById('login-screen').style.display = 'block';
+  document.getElementById('user-mini').style.display = 'none';
+  document.getElementById('btn-logout').style.display = 'none';
+}
+
+function clearAuthSession(showToastMessage = false) {
   authToken = null;
   currentUser = null;
   localStorage.removeItem('sakshyaai_token');
   localStorage.removeItem('sakshyaai_user');
-  showLoginScreen();
-  showToast('Logged out', 'info');
-}
-
-function showLoginScreen() {
-  document.querySelectorAll('.view').forEach(v => v.style.display = 'none');
-  document.getElementById('login-screen').style.display = 'block';
-  document.getElementById('user-info').style.display = 'none';
-  document.getElementById('btn-logout').style.display = 'none';
-}
-
-// ── Navigation ──────────────────────────────────
-document.querySelectorAll('.nav-link').forEach(link => {
-  link.addEventListener('click', (e) => {
-    e.preventDefault();
-    const view = link.dataset.view;
-    if (view) switchView(view);
-  });
-});
-
-function switchView(view) {
-  if (!authToken) return showLoginScreen();
-  currentView = view;
-
-  document.querySelectorAll('.view').forEach(v => v.style.display = 'none');
-  const viewEl = document.getElementById(`${view}-view`);
-  if (viewEl) viewEl.style.display = 'block';
-
-  document.querySelectorAll('.nav-link').forEach(n => n.classList.remove('active'));
-  const navLink = document.querySelector(`[data-view="${view}"]`);
-  if (navLink) navLink.classList.add('active');
-
-  // Load data for the view
-  switch (view) {
-    case 'dashboard': loadDashboard(); break;
-    case 'grievances': loadGrievances(); break;
-    case 'verification': loadVerificationView(); break;
-    case 'departments': loadDepartments(); break;
+  if (showToastMessage) {
+    showToast('Logged out successfully.', 'info');
   }
 }
 
-// ── App Init ────────────────────────────────────
-function initApp() {
-  if (!authToken || !currentUser) return showLoginScreen();
-
-  // Show user info
-  document.getElementById('login-screen').style.display = 'none';
-  document.getElementById('user-info').style.display = 'flex';
-  document.getElementById('btn-logout').style.display = 'flex';
-  document.getElementById('user-name').textContent = currentUser.name;
-  document.getElementById('user-role').textContent = currentUser.role;
-  document.getElementById('user-avatar').textContent = currentUser.name.charAt(0).toUpperCase();
-
-  // Show appropriate default view based on role
-  switchView('dashboard');
+function logout() {
+  clearAuthSession(true);
+  showLoginScreen();
 }
 
-// ── Dashboard ───────────────────────────────────
+async function initApp() {
+  if (!authToken || !currentUser) {
+    showLoginScreen();
+    return;
+  }
+
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('user-mini').style.display = 'flex';
+  document.getElementById('btn-logout').style.display = 'inline-flex';
+  document.getElementById('user-avatar-mini').textContent = currentUser.name?.charAt(0)?.toUpperCase() || 'U';
+  document.getElementById('user-name-mini').textContent = currentUser.name || 'User';
+  document.getElementById('user-role-mini').textContent = roleLabel(currentUser.role);
+
+  applyRoleVisibility();
+  await ensureDepartmentsLoaded();
+  currentView = canAccessView(currentView) ? currentView : getDefaultView();
+  switchView(currentView);
+}
+
+function switchView(view) {
+  if (!authToken) {
+    showLoginScreen();
+    return;
+  }
+
+  if (!canAccessView(view)) {
+    view = getDefaultView();
+  }
+
+  currentView = view;
+  document.querySelectorAll('.view').forEach((section) => {
+    section.style.display = 'none';
+  });
+
+  const target = document.getElementById(`${view}-view`);
+  if (target) {
+    target.style.display = 'block';
+  }
+
+  document.querySelectorAll('.nav-link').forEach((link) => {
+    link.classList.toggle('active', link.dataset.view === view);
+  });
+
+  if (view === 'dashboard') loadDashboard();
+  if (view === 'grievances') loadGrievances();
+  if (view === 'verification') loadVerificationView();
+  if (view === 'evidence') loadEvidenceView();
+  if (view === 'departments') loadDepartments();
+}
+
+async function ensureDepartmentsLoaded() {
+  if (departmentsCache.length) return departmentsCache;
+
+  const { ok, data } = await api('/api/departments');
+  const select = document.getElementById('create-department');
+
+  if (ok && Array.isArray(data.departments)) {
+    departmentsCache = data.departments;
+    if (select) {
+      select.innerHTML = departmentsCache
+        .map((department) => `<option value="${department.name}">${department.name}</option>`)
+        .join('');
+    }
+  } else if (select) {
+    select.innerHTML = '<option value="">No departments available</option>';
+  }
+
+  return departmentsCache;
+}
+
 async function loadDashboard() {
-  // Try collector dashboard first
+  if (currentUser?.role !== 'collector') {
+    await loadBasicStats();
+    renderDepartmentScoreRows([]);
+    return;
+  }
+
   const { ok, data } = await api('/api/collector/dashboard');
 
   if (ok && data.overview) {
@@ -148,435 +366,693 @@ async function loadDashboard() {
     document.getElementById('stat-pending').textContent = data.overview.pendingVerification;
     document.getElementById('stat-closed').textContent = data.overview.closed;
     document.getElementById('stat-reopened').textContent = data.overview.reopened;
-
-    // Render department scores
-    const tbody = document.getElementById('dept-scores-body');
-    if (data.departments && data.departments.length > 0) {
-      tbody.innerHTML = data.departments.map(d => {
-        const scoreColor = d.score >= 80 ? 'var(--accent-success)' : d.score >= 50 ? 'var(--accent-warning)' : 'var(--accent-danger)';
-        return `<tr>
-          <td><strong>${d.department.name}</strong><br><small style="color:var(--text-muted)">${d.department.code}</small></td>
-          <td>${d.department.district || '—'}</td>
-          <td>
-            <div class="score-bar-container">
-              <span class="score-value" style="color:${scoreColor}">${d.score}%</span>
-              <div class="score-bar">
-                <div class="score-bar-fill" style="width:${d.score}%;background:${scoreColor}"></div>
-              </div>
-            </div>
-          </td>
-          <td>${d.totalGrievances}</td>
-          <td style="color:var(--accent-success)">${d.successfulVerifications}</td>
-          <td style="color:var(--accent-danger)">${d.failedVerifications}</td>
-          <td style="color:var(--accent-warning)">${d.pendingVerification}</td>
-          <td style="color:var(--accent-danger)">${d.reopened}</td>
-        </tr>`;
-      }).join('');
-    } else {
-      tbody.innerHTML = '<tr><td colspan="8" class="loading-cell">No department data yet. Run seed first.</td></tr>';
-    }
-  } else {
-    // Fallback: load basic stats from grievances
-    await loadBasicStats();
+    renderDepartmentScoreRows(data.departments || []);
+    return;
   }
+
+  await loadBasicStats();
+  renderDepartmentScoreRows([]);
+}
+
+function renderDepartmentScoreRows(rows) {
+  const tbody = document.getElementById('dept-scores-body');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="loading-cell">Department data is not available for this role yet.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = rows.map((item) => {
+    const color = scoreColor(Number(item.score || 0));
+    return `
+      <tr>
+        <td>
+          <strong>${item.department.name}</strong><br>
+          <span class="inline-hint">${item.department.code || 'No code'}</span>
+        </td>
+        <td>${item.department.district || '-'}</td>
+        <td>
+          <div class="score-wrap">
+            <strong style="color:${color};">${Number(item.score || 0)}%</strong>
+            <div class="score-track">
+              <div class="score-fill" style="width:${Number(item.score || 0)}%; background:${color};"></div>
+            </div>
+          </div>
+        </td>
+        <td>${item.totalGrievances || 0}</td>
+        <td>${item.successfulVerifications || 0}</td>
+        <td>${item.failedVerifications || 0}</td>
+        <td>${item.pendingVerification || 0}</td>
+        <td>${item.reopened || 0}</td>
+      </tr>
+    `;
+  }).join('');
 }
 
 async function loadBasicStats() {
-  const { ok, data } = await api('/api/grievances?limit=1000');
-  if (ok && data.grievances) {
-    document.getElementById('stat-total').textContent = data.total || data.grievances.length;
-    document.getElementById('stat-open').textContent = data.grievances.filter(g => g.status === 'OPEN').length;
-    document.getElementById('stat-pending').textContent = data.grievances.filter(g => g.status === 'PENDING_VERIFICATION').length;
-    document.getElementById('stat-closed').textContent = data.grievances.filter(g => g.status === 'CLOSED').length;
-    document.getElementById('stat-reopened').textContent = data.grievances.filter(g => g.status === 'REOPENED').length;
+  const { ok, data } = await api('/api/grievances?limit=200');
+  if (!ok || !Array.isArray(data.grievances)) {
+    return;
   }
+
+  const grievances = data.grievances;
+  document.getElementById('stat-total').textContent = grievances.length;
+  document.getElementById('stat-open').textContent = grievances.filter((item) => item.status === 'open').length;
+  document.getElementById('stat-pending').textContent = grievances.filter((item) => item.status === 'verification_pending').length;
+  document.getElementById('stat-closed').textContent = grievances.filter((item) => item.status === 'verified').length;
+  document.getElementById('stat-reopened').textContent = grievances.filter((item) => item.status === 'reopened').length;
 }
 
 function refreshDashboard() {
-  showToast('Refreshing dashboard...', 'info');
+  showToast('Refreshing dashboard data...', 'info');
   loadDashboard();
 }
 
-// ── Grievances ──────────────────────────────────
 async function loadGrievances() {
   const status = document.getElementById('filter-status').value;
-  const query = status ? `?status=${status}` : '';
-
+  const query = status ? `?status=${encodeURIComponent(status)}` : '';
   const { ok, data } = await api(`/api/grievances${query}`);
   const tbody = document.getElementById('grievances-body');
 
-  if (ok && data.grievances) {
-    if (data.grievances.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" class="loading-cell">No grievances found.</td></tr>';
-      return;
-    }
-    tbody.innerHTML = data.grievances.map(g => `
+  if (!ok || !Array.isArray(data.grievances)) {
+    tbody.innerHTML = '<tr><td colspan="7" class="loading-cell">Unable to load grievances.</td></tr>';
+    return;
+  }
+
+  if (!data.grievances.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="loading-cell">No grievances found for the selected filter.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = data.grievances.map((grievance) => {
+    const statusInfo = formatStatus(grievance.status);
+    const canResolve = ['department_officer', 'collector'].includes(currentUser?.role) && grievance.status === 'open';
+    return `
       <tr>
-        <td><code>${g.swagatId || '—'}</code></td>
-        <td><strong>${g.title}</strong></td>
-        <td>${g.category}</td>
-        <td>${g.address}</td>
-        <td><span class="status-badge status-${g.status}">${g.status.replace('_', ' ')}</span></td>
-        <td>${g.department?.name || '—'}</td>
+        <td><strong>${grievance.swagatId}</strong></td>
+        <td>${grievance.title}</td>
+        <td>${categoryLabel(grievance.category)}</td>
+        <td>${grievance.address || '-'}</td>
+        <td><span class="status-badge ${statusInfo.className}">${statusInfo.label}</span></td>
+        <td>${formatDepartmentName(grievance.department)}</td>
         <td>
-          ${g.status === 'OPEN' && currentUser?.role === 'DEPARTMENT' ?
-            `<button class="btn btn-sm btn-primary" onclick="resolveGrievance('${g._id}')">Resolve</button>` : ''}
-          ${g.status === 'PENDING_VERIFICATION' ?
-            `<button class="btn btn-sm btn-outline" onclick="viewGrievanceDetail('${g._id}')">View</button>` : ''}
-          ${g.status === 'REOPENED' ?
-            `<button class="btn btn-sm btn-danger" onclick="viewGrievanceDetail('${g._id}')">Details</button>` : ''}
-          ${!['OPEN', 'PENDING_VERIFICATION', 'REOPENED'].includes(g.status) ?
-            `<button class="btn btn-sm btn-outline" onclick="viewGrievanceDetail('${g._id}')">View</button>` : ''}
+          ${canResolve ? `<button class="secondary-button" onclick="resolveGrievance('${grievance.id}')">Resolve</button>` : ''}
+          <button class="secondary-button" onclick="viewGrievanceDetail('${grievance.id}')">View</button>
         </td>
       </tr>
-    `).join('');
-  } else {
-    tbody.innerHTML = '<tr><td colspan="7" class="loading-cell">Failed to load grievances.</td></tr>';
-  }
+    `;
+  }).join('');
 }
 
 async function resolveGrievance(id) {
-  showToast('Marking grievance as resolved...', 'info');
   const { ok, data } = await api(`/api/grievances/${id}/resolve`, { method: 'POST' });
-  if (ok) {
-    showToast('✅ Grievance moved to PENDING_VERIFICATION. IVR triggered!', 'success');
-    loadGrievances();
-  } else {
-    showToast(`❌ ${data.error}`, 'error');
+  if (!ok) {
+    showToast(data.error || 'Unable to mark grievance for verification.', 'error');
+    return;
   }
+
+  showToast('Grievance moved to verification workflow. A field officer must upload evidence before the citizen IVR call starts.', 'success');
+  loadGrievances();
+  if (currentView === 'verification') loadVerificationView();
+  if (currentView === 'evidence') loadEvidenceView();
 }
 
 async function viewGrievanceDetail(id) {
   const { ok, data } = await api(`/api/grievances/${id}`);
-  if (!ok) return showToast('Failed to load grievance', 'error');
+  if (!ok) {
+    showToast(data.error || 'Unable to load grievance details.', 'error');
+    return;
+  }
 
-  const g = data.grievance;
-  const v = data.verificationLog;
+  const grievance = data.grievance;
+  const verification = data.verificationLog;
+  const statusInfo = formatStatus(grievance.status);
+  const verificationText = verification
+    ? `
+      <div class="detail-line"><strong>Verification status:</strong> ${verification.status || 'pending'}</div>
+      <div class="detail-line"><strong>IVR result:</strong> ${verification.ivrResult || 'pending'}</div>
+      <div class="detail-line"><strong>Reason:</strong> ${verification.reason || 'Awaiting evaluation'}</div>
+    `
+    : '<div class="detail-line">No verification log exists yet.</div>';
 
-  document.getElementById('modal-title').textContent = `Grievance: ${g.swagatId || g._id}`;
+  document.getElementById('modal-title').textContent = grievance.swagatId;
   document.getElementById('modal-body').innerHTML = `
-    <div style="display:flex;flex-direction:column;gap:1rem;">
-      <div>
-        <strong style="font-size:1.05rem;">${g.title}</strong>
-        <p style="color:var(--text-secondary);margin-top:0.3rem;font-size:0.85rem;">${g.description}</p>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;">
-        <div><small style="color:var(--text-muted)">Status</small><br><span class="status-badge status-${g.status}">${g.status}</span></div>
-        <div><small style="color:var(--text-muted)">Category</small><br>${g.category}</div>
-        <div><small style="color:var(--text-muted)">Address</small><br>${g.address}</div>
-        <div><small style="color:var(--text-muted)">Phone</small><br>${g.complainantPhone}</div>
-        <div><small style="color:var(--text-muted)">Department</small><br>${g.department?.name || '—'}</div>
-        <div><small style="color:var(--text-muted)">GPS</small><br>${g.location?.coordinates?.join(', ') || '—'}</div>
-      </div>
-      ${v ? `
-      <div style="border-top:1px solid var(--border-color);padding-top:1rem;">
-        <strong>Verification Log</strong>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;margin-top:0.5rem;">
-          <div><small style="color:var(--text-muted)">Citizen Response</small><br><span class="status-badge status-${v.citizenResponse === 'CONFIRMED' ? 'CLOSED' : v.citizenResponse === 'DISPUTED' ? 'REOPENED' : 'PENDING_VERIFICATION'}">${v.citizenResponse}</span></div>
-          <div><small style="color:var(--text-muted)">Final Status</small><br>${v.finalStatus}</div>
-          <div style="grid-column:span 2"><small style="color:var(--text-muted)">Decision Reason</small><br>${v.decisionReason || '—'}</div>
-        </div>
-      </div>
-      ` : ''}
-    </div>
+    <div class="detail-title">${grievance.title}</div>
+    <div class="detail-line"><strong>Status:</strong> <span class="status-badge ${statusInfo.className}">${statusInfo.label}</span></div>
+    <div class="detail-line"><strong>Category:</strong> ${categoryLabel(grievance.category)}</div>
+    <div class="detail-line"><strong>Department:</strong> ${formatDepartmentName(grievance.department)}</div>
+    <div class="detail-line"><strong>Citizen:</strong> ${grievance.citizen?.name || '-'}</div>
+    <div class="detail-line"><strong>Phone:</strong> ${grievance.citizen?.phone || '-'}</div>
+    <div class="detail-line"><strong>Address:</strong> ${grievance.address || '-'}</div>
+    <div class="detail-line"><strong>Coordinates:</strong> ${grievance.locationLat}, ${grievance.locationLng}</div>
+    <div class="detail-line"><strong>Assigned Officer:</strong> ${grievance.assignedOfficer?.name || 'Not assigned yet'}</div>
+    <div class="detail-line"><strong>Description:</strong> ${grievance.description}</div>
+    <hr>
+    ${verificationText}
   `;
-  document.getElementById('modal-overlay').style.display = 'flex';
+  document.getElementById('modal-overlay').style.display = 'grid';
 }
 
 function closeModal() {
   document.getElementById('modal-overlay').style.display = 'none';
 }
 
-function showCreateGrievanceModal() {
-  showToast('Create grievance via API: POST /api/grievances', 'info');
-}
-
-// ── Verification Workflow ───────────────────────
-async function loadVerificationView() {
-  const { ok, data } = await api('/api/grievances?status=PENDING_VERIFICATION&limit=100');
-  const select = document.getElementById('verify-grievance-select');
-
-  select.innerHTML = '<option value="">Select a grievance...</option>';
-  if (ok && data.grievances) {
-    // Also include OPEN ones for resolve testing
-    const { data: openData } = await api('/api/grievances?status=OPEN&limit=100');
-    const all = [...data.grievances, ...(openData?.grievances || [])];
-
-    all.forEach(g => {
-      const opt = document.createElement('option');
-      opt.value = g._id;
-      opt.textContent = `[${g.status}] ${g.swagatId || ''} — ${g.title}`;
-      select.appendChild(opt);
-    });
+async function showCreateGrievanceModal() {
+  if (currentUser?.role !== 'citizen') {
+    showToast('Only citizens can create grievances from this workspace.', 'warning');
+    return;
   }
 
-  select.onchange = async () => {
-    const id = select.value;
-    if (!id) {
-      document.getElementById('verify-detail-box').style.display = 'none';
-      return;
-    }
-    const { ok, data } = await api(`/api/grievances/${id}`);
-    if (ok) {
-      const g = data.grievance;
-      document.getElementById('verify-detail-box').style.display = 'block';
-      document.getElementById('verify-detail-box').innerHTML = `
-        <strong>${g.title}</strong> <span class="status-badge status-${g.status}">${g.status}</span>
-        <br><small style="color:var(--text-muted)">${g.address} | Phone: ${g.complainantPhone} | GPS: ${g.location.coordinates.join(', ')}</small>
-        ${g.status === 'OPEN' ? `<br><br><button class="btn btn-primary btn-sm" onclick="resolveAndReload('${g._id}')">Mark as Resolved (triggers verification)</button>` : ''}
-      `;
+  const departments = await ensureDepartmentsLoaded();
+  document.getElementById('create-grievance-error').style.display = 'none';
+  if (!departments.length) {
+    document.getElementById('create-grievance-error').textContent = 'Department list is unavailable right now. Refresh and try again.';
+    document.getElementById('create-grievance-error').style.display = 'block';
+  }
+  document.getElementById('create-grievance-overlay').style.display = 'grid';
+}
 
-      // Pre-fill evidence GPS
-      if (g.location?.coordinates) {
-        document.getElementById('evidence-lon').value = g.location.coordinates[0];
-        document.getElementById('evidence-lat').value = g.location.coordinates[1];
-      }
-    }
+function closeCreateGrievanceModal() {
+  document.getElementById('create-grievance-overlay').style.display = 'none';
+}
+
+async function handleCreateGrievance(event) {
+  event.preventDefault();
+
+  if (currentUser?.role !== 'citizen') {
+    showToast('Only citizens can submit new grievances.', 'warning');
+    return;
+  }
+
+  const button = document.getElementById('create-grievance-btn');
+  const error = document.getElementById('create-grievance-error');
+
+  const payload = {
+    title: document.getElementById('create-title').value.trim(),
+    description: document.getElementById('create-description').value.trim(),
+    category: document.getElementById('create-category').value,
+    priority: document.getElementById('create-priority').value,
+    address: document.getElementById('create-address').value.trim(),
+    latitude: document.getElementById('create-latitude').value,
+    longitude: document.getElementById('create-longitude').value,
+    department: document.getElementById('create-department').value,
   };
 
-  // Reset results
-  ['ivr-result', 'evidence-result', 'eval-result'].forEach(id => {
-    document.getElementById(id).style.display = 'none';
+  button.disabled = true;
+  button.textContent = 'Submitting...';
+
+  const { ok, data } = await api('/api/grievances', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+
+  if (!ok) {
+    error.textContent = data.error || 'Unable to create grievance.';
+    error.style.display = 'block';
+    button.disabled = false;
+    button.textContent = 'Submit Grievance';
+    return;
+  }
+
+  closeCreateGrievanceModal();
+  event.target.reset();
+  button.disabled = false;
+  button.textContent = 'Submit Grievance';
+  showToast('Grievance created successfully.', 'success');
+  loadGrievances();
+  loadDashboard();
+}
+
+async function loadVerificationView() {
+  const [pendingResponse, openResponse] = await Promise.all([
+    api('/api/grievances?status=verification_pending&limit=100'),
+    api('/api/grievances?status=open&limit=100'),
+  ]);
+
+  const select = document.getElementById('verify-grievance-select');
+  select.innerHTML = '<option value="">Select a grievance</option>';
+
+  const items = [
+    ...(pendingResponse.data.grievances || []),
+    ...(openResponse.data.grievances || []),
+  ];
+
+  items.forEach((grievance) => {
+    const option = document.createElement('option');
+    option.value = grievance.id;
+    option.textContent = `[${formatStatus(grievance.status).label}] ${grievance.swagatId} - ${grievance.title}`;
+    select.appendChild(option);
+  });
+
+  select.onchange = async () => {
+    const grievanceId = select.value;
+    const box = document.getElementById('verify-detail-box');
+    if (!grievanceId) {
+      box.style.display = 'none';
+      return;
+    }
+
+    const { ok, data } = await api(`/api/grievances/${grievanceId}`);
+    if (!ok) {
+      showToast(data.error || 'Unable to load grievance.', 'error');
+      return;
+    }
+
+    const grievance = data.grievance;
+    box.style.display = 'block';
+    box.innerHTML = `
+      <div class="detail-title">${grievance.title}</div>
+      <div class="detail-line"><strong>Status:</strong> ${formatStatus(grievance.status).label}</div>
+      <div class="detail-line"><strong>Department:</strong> ${formatDepartmentName(grievance.department)}</div>
+      <div class="detail-line"><strong>Citizen phone:</strong> ${grievance.citizen?.phone || '-'}</div>
+      <div class="detail-line"><strong>Coordinates:</strong> ${grievance.locationLat}, ${grievance.locationLng}</div>
+      <div class="detail-line"><strong>Assigned Officer:</strong> ${grievance.assignedOfficer?.name || 'Pending automatic assignment'}</div>
+      ${grievance.status === 'open' && ['department_officer', 'collector'].includes(currentUser?.role)
+        ? `<div class="detail-line"><button class="primary-button" onclick="resolveAndReload('${grievance.id}')">Mark as Resolved</button></div>`
+        : ''}
+    `;
+  };
+
+  ['ivr-result', 'eval-result'].forEach((id) => {
+    const element = document.getElementById(id);
+    element.style.display = 'none';
+    element.className = 'result-card';
+    element.innerHTML = '';
   });
 }
 
 async function resolveAndReload(id) {
-  const { ok, data } = await api(`/api/grievances/${id}/resolve`, { method: 'POST' });
-  if (ok) {
-    showToast('✅ Verification triggered!', 'success');
-    loadVerificationView();
-  } else {
-    showToast(`❌ ${data.error}`, 'error');
-  }
+  await resolveGrievance(id);
+  loadVerificationView();
 }
 
 async function simulateIvr(digit) {
-  const id = document.getElementById('verify-grievance-select').value;
-  if (!id) return showToast('Select a grievance first', 'warning');
+  const grievanceId = document.getElementById('verify-grievance-select').value;
+  if (!grievanceId) {
+    showToast('Select a grievance first.', 'warning');
+    return;
+  }
 
-  const { ok, data } = await api(`/api/grievances/${id}/simulate-ivr`, {
+  const { ok, data } = await api(`/api/grievances/${grievanceId}/simulate-ivr`, {
     method: 'POST',
     body: JSON.stringify({ digit }),
   });
 
-  const resultEl = document.getElementById('ivr-result');
-  resultEl.style.display = 'block';
+  const panel = document.getElementById('ivr-result');
+  panel.style.display = 'block';
 
-  if (ok) {
-    const response = data.verificationLog?.citizenResponse;
-    const isConfirm = response === 'CONFIRMED';
-    resultEl.className = `ivr-result ${isConfirm ? 'result-success' : 'result-warning'}`;
-    resultEl.innerHTML = `<strong>📞 IVR Response: ${response}</strong><br>
-      ${isConfirm ? 'Citizen confirmed resolution.' : 'Citizen disputed. Grievance will auto-reopen unless evidence overrides.'}
-      <br><small>Call SID: ${data.verificationLog?.ivrCallSid} | Time: ${new Date(data.verificationLog?.ivrTimestamp).toLocaleString()}</small>`;
-    showToast(`IVR: ${response}`, isConfirm ? 'success' : 'warning');
-  } else {
-    resultEl.className = 'ivr-result result-error';
-    resultEl.textContent = `Error: ${data.error}`;
+  if (!ok) {
+    panel.className = 'result-card error';
+    panel.textContent = data.error || 'Unable to simulate IVR.';
+    return;
   }
+
+  const ivrResult = data.verificationLog?.ivrResult || 'pending';
+  const isPositive = ivrResult === 'resolved';
+  panel.className = `result-card ${isPositive ? 'success' : 'warning'}`;
+  panel.innerHTML = `<strong>IVR result:</strong> ${ivrResult}`;
+  showToast(`Citizen response recorded as ${ivrResult}.`, isPositive ? 'success' : 'warning');
+}
+
+async function loadEvidenceView() {
+  if (!authToken) {
+    showLoginScreen();
+    return;
+  }
+
+  const response = await api('/api/grievances?status=verification_pending&limit=100');
+  const select = document.getElementById('evidence-grievance-select');
+  const detail = document.getElementById('evidence-grievance-detail');
+  select.innerHTML = '<option value="">Select a grievance</option>';
+
+  (response.data.grievances || []).forEach((grievance) => {
+    const option = document.createElement('option');
+    option.value = grievance.id;
+    option.textContent = `${grievance.swagatId} - ${grievance.title}`;
+    select.appendChild(option);
+  });
+
+  select.onchange = async () => {
+    const grievanceId = select.value;
+    if (!grievanceId) {
+      detail.style.display = 'none';
+      document.getElementById('evidence-history-box').style.display = 'none';
+      return;
+    }
+
+    const { ok, data } = await api(`/api/grievances/${grievanceId}`);
+    if (!ok) {
+      showToast(data.error || 'Unable to load grievance details.', 'error');
+      return;
+    }
+
+    const grievance = data.grievance;
+    detail.style.display = 'block';
+    detail.innerHTML = `
+      <div class="detail-title">${grievance.title}</div>
+      <div class="detail-line"><strong>Department:</strong> ${formatDepartmentName(grievance.department)}</div>
+      <div class="detail-line"><strong>Resolved At:</strong> ${grievance.resolvedAt ? new Date(grievance.resolvedAt).toLocaleString() : 'Not resolved yet'}</div>
+      <div class="detail-line"><strong>Complaint Coordinates:</strong> ${grievance.locationLat}, ${grievance.locationLng}</div>
+      <div class="detail-line"><strong>Assigned Officer:</strong> ${grievance.assignedOfficer?.name || 'Pending automatic assignment'}</div>
+    `;
+
+    document.getElementById('evidence-lat').value = '';
+    document.getElementById('evidence-lon').value = '';
+    document.getElementById('evidence-location-meta').textContent = 'GPS not captured yet.';
+    evidenceGpsCaptured = false;
+    document.getElementById('evidence-result').style.display = 'none';
+    await loadEvidenceHistory(grievanceId);
+  };
+}
+
+async function loadEvidenceHistory(grievanceId) {
+  const history = await api(`/api/evidence/${grievanceId}`);
+  const box = document.getElementById('evidence-history-box');
+  if (!history.ok || !Array.isArray(history.data.evidence) || !history.data.evidence.length) {
+    box.style.display = 'block';
+    box.innerHTML = '<div class="detail-title">Evidence history</div><div class="detail-line">No evidence uploaded yet.</div>';
+    return;
+  }
+
+  renderEvidenceHistory(history.data.evidence[0]);
+}
+
+function renderEvidenceHistory(evidence) {
+  const box = document.getElementById('evidence-history-box');
+  box.style.display = 'block';
+  box.innerHTML = `
+    <div class="detail-title">Latest evidence result</div>
+    <div class="detail-line"><strong>Status:</strong> ${evidence.verificationStatus || 'unknown'}</div>
+    <div class="detail-line"><strong>Reason:</strong> ${evidence.verificationReason || '-'}</div>
+    <div class="detail-line"><strong>Distance:</strong> ${evidence.gpsDistanceM || 0}m</div>
+    <div class="detail-line"><strong>Hash:</strong> ${evidence.imageHash || '-'}</div>
+    <div class="detail-line"><strong>Captured At:</strong> ${evidence.capturedAt ? new Date(evidence.capturedAt).toLocaleString() : '-'}</div>
+  `;
+}
+
+function captureEvidenceLocation() {
+  if (!navigator.geolocation) {
+    showToast('Geolocation is not supported in this browser.', 'error');
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    (position) => {
+      const latitude = position.coords.latitude;
+      const longitude = position.coords.longitude;
+      document.getElementById('evidence-lat').value = latitude.toFixed(6);
+      document.getElementById('evidence-lon').value = longitude.toFixed(6);
+      document.getElementById('evidence-location-meta').textContent = `Live GPS captured at ${new Date().toLocaleTimeString()}: ${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
+      evidenceGpsCaptured = true;
+      showToast('Live GPS captured.', 'success');
+    },
+    (error) => {
+      showToast(`Unable to capture GPS: ${error.message}`, 'error');
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+  );
+}
+
+async function prefillEvidenceLocation() {
+  const grievanceId = document.getElementById('evidence-grievance-select').value;
+  if (!grievanceId) {
+    showToast('Select a grievance first.', 'warning');
+    return;
+  }
+
+  const { ok, data } = await api(`/api/grievances/${grievanceId}`);
+  if (!ok) {
+    showToast(data.error || 'Unable to load grievance coordinates.', 'error');
+    return;
+  }
+
+  document.getElementById('evidence-lat').value = Number(data.grievance.locationLat).toFixed(6);
+  document.getElementById('evidence-lon').value = Number(data.grievance.locationLng).toFixed(6);
+  document.getElementById('evidence-location-meta').textContent = 'Complaint coordinates filled for testing.';
+  evidenceGpsCaptured = false;
 }
 
 async function submitEvidence() {
-  const id = document.getElementById('verify-grievance-select').value;
-  if (!id) return showToast('Select a grievance first', 'warning');
+  const grievanceId = document.getElementById('evidence-grievance-select').value;
+  if (!grievanceId) {
+    showToast('Select a grievance first.', 'warning');
+    return;
+  }
 
-  const lat = parseFloat(document.getElementById('evidence-lat').value);
-  const lon = parseFloat(document.getElementById('evidence-lon').value);
+  if (!evidenceCaptureFile) {
+    showToast('Capture a fresh photo first.', 'warning');
+    return;
+  }
 
-  if (isNaN(lat) || isNaN(lon)) return showToast('Enter valid GPS coordinates', 'warning');
+  if (!evidenceGpsCaptured) {
+    showToast('Capture live GPS on site before uploading evidence.', 'warning');
+    return;
+  }
 
-  // Step 1: Get presigned URL (mock)
-  showToast('Generating upload URL...', 'info');
-  const { ok: urlOk, data: urlData } = await api(`/api/evidence/upload-url?grievanceId=${id}&fileName=evidence_photo.jpg&fileType=image/jpeg`);
+  const latitude = parseFloat(document.getElementById('evidence-lat').value);
+  const longitude = parseFloat(document.getElementById('evidence-lon').value);
+  if (Number.isNaN(latitude) || Number.isNaN(longitude)) {
+    showToast('Capture valid GPS coordinates first.', 'warning');
+    return;
+  }
 
-  if (!urlOk) return showToast(`Upload URL error: ${urlData.error}`, 'error');
+  if (!evidenceCapturedAt) {
+    evidenceCapturedAt = new Date().toISOString();
+  }
 
-  // Step 2: Confirm evidence with GPS
-  const { ok, data } = await api('/api/evidence/confirm', {
+  const formData = new FormData();
+  formData.append('grievanceId', grievanceId);
+  formData.append('latitude', String(latitude));
+  formData.append('longitude', String(longitude));
+  formData.append('timestamp', evidenceCapturedAt);
+  formData.append('photo', evidenceCaptureFile);
+
+  const button = document.getElementById('evidence-upload-btn');
+  button.disabled = true;
+  button.textContent = 'Uploading...';
+
+  const { ok, status, data } = await api('/api/evidence/upload', {
     method: 'POST',
-    body: JSON.stringify({
-      grievanceId: id,
-      imageKey: urlData.key || `evidence/${id}/mock_photo.jpg`,
-      latitude: lat,
-      longitude: lon,
-    }),
+    body: formData,
   });
 
-  const resultEl = document.getElementById('evidence-result');
-  resultEl.style.display = 'block';
+  button.disabled = false;
+  button.textContent = 'Upload Evidence';
 
-  if (ok) {
-    const gpsOk = data.gpsValid;
-    resultEl.className = `evidence-result ${gpsOk ? 'result-success' : 'result-warning'}`;
-    resultEl.innerHTML = `<strong>📸 Evidence Uploaded</strong><br>
-      GPS Distance: <strong>${data.distance}m</strong> (threshold: ${data.threshold}m)
-      <br>GPS Valid: <strong style="color:${gpsOk ? 'var(--accent-success)' : 'var(--accent-danger)'}">${gpsOk ? '✅ YES' : '❌ NO'}</strong>
-      <br><small>Image key: ${data.evidence?.imageKey}</small>`;
-    showToast(`Evidence uploaded. GPS: ${gpsOk ? 'valid' : 'invalid (too far)'}`, gpsOk ? 'success' : 'warning');
+  const panel = document.getElementById('evidence-result');
+  panel.style.display = 'block';
+
+  if (!ok && status !== 422) {
+    panel.className = 'result-card error';
+    panel.innerHTML = `<strong>Upload Failed</strong><br>${data.error || 'Unable to upload evidence.'}`;
+    showToast('Evidence upload failed.', 'error');
+    return;
+  }
+
+  const statusLabel = data.verificationStatus === 'suspicious'
+    ? 'Suspicious Evidence'
+    : data.isValid
+      ? 'Valid Evidence'
+      : 'Invalid Evidence';
+  const panelTone = data.verificationStatus === 'suspicious'
+    ? 'warning'
+    : data.isValid
+      ? 'success'
+      : 'error';
+
+  panel.className = `result-card ${panelTone}`;
+  panel.innerHTML = `
+    <strong>${statusLabel}</strong><br>
+    ${data.verificationReason}<br>
+    GPS distance: ${data.distance}m<br>
+    Hash: ${data.imageHash}
+  `;
+  if (data.ivrCall?.phone) {
+    panel.innerHTML += `<br>Citizen IVR call started for ${data.ivrCall.phone}`;
+  }
+  if (data.evidence) {
+    renderEvidenceHistory(data.evidence);
+  }
+
+  if (data.isValid) {
+    showToast(data.ivrCall?.phone ? 'Evidence passed validation and the citizen IVR call has been started.' : 'Evidence passed photo and GPS validation.', 'success');
+  } else if (data.verificationStatus === 'suspicious') {
+    showToast(data.ivrCall?.phone ? 'Evidence uploaded, GPS looks suspicious, and the citizen IVR call has been started.' : 'Evidence uploaded, but the GPS location looks suspicious.', 'warning');
   } else {
-    resultEl.className = 'evidence-result result-error';
-    resultEl.textContent = `Error: ${data.error}`;
+    showToast(data.ivrCall?.phone ? 'Evidence uploaded, photo validation failed, and the citizen IVR call has been started.' : 'Evidence uploaded, but the photo validation failed.', 'error');
   }
 }
 
 async function runEvaluation() {
-  const id = document.getElementById('verify-grievance-select').value;
-  if (!id) return showToast('Select a grievance first', 'warning');
-
-  showToast('Running verification engine...', 'info');
-  const { ok, data } = await api(`/api/grievances/${id}/evaluate`, { method: 'POST' });
-
-  const resultEl = document.getElementById('eval-result');
-  resultEl.style.display = 'block';
-
-  if (ok) {
-    const closed = data.result?.finalStatus === 'CLOSED';
-    resultEl.className = `eval-result ${closed ? 'result-success' : 'result-error'}`;
-    resultEl.innerHTML = `<strong>⚡ Verification Result: ${data.result?.finalStatus}</strong><br>
-      <em>${data.result?.reason}</em>`;
-    showToast(`Verification: ${data.result?.finalStatus}`, closed ? 'success' : 'error');
-  } else {
-    resultEl.className = 'eval-result result-error';
-    resultEl.textContent = `Error: ${data.error}`;
-  }
-}
-
-// ── Departments View ────────────────────────────
-async function loadDepartments() {
-  const grid = document.getElementById('dept-cards-grid');
-  grid.innerHTML = '<p style="color:var(--text-muted);padding:1rem;">Loading department scores...</p>';
-
-  // Use the collector dashboard which has all dept scores in one call
-  const { ok, data } = await api('/api/collector/dashboard');
-
-  // Fallback: fetch departments list and their individual scores
-  if (!ok || !data.departments) {
-    const { ok: dOk, data: dData } = await api('/api/departments');
-    if (!dOk || !dData.departments) {
-      grid.innerHTML = '<p style="color:var(--text-muted);padding:1rem;">Could not load department data. Ensure you are logged in as Collector.</p>';
-      return;
-    }
-    // Build cards with zero scores as fallback
-    grid.innerHTML = dData.departments.map(dept => buildDeptCard({
-      department: dept,
-      score: 100,
-      totalGrievances: 0,
-      successfulVerifications: 0,
-      failedVerifications: 0,
-      pendingVerification: 0,
-      reopened: 0,
-    })).join('');
+  const grievanceId = document.getElementById('verify-grievance-select').value;
+  if (!grievanceId) {
+    showToast('Select a grievance first.', 'warning');
     return;
   }
 
-  // Sort worst score first for quick action
-  const sorted = [...data.departments].sort((a, b) => a.score - b.score);
-  grid.innerHTML = sorted.map(d => buildDeptCard(d)).join('');
-}
+  const { ok, data } = await api(`/api/grievances/${grievanceId}/evaluate`, { method: 'POST' });
+  const panel = document.getElementById('eval-result');
+  panel.style.display = 'block';
 
-function buildDeptCard(d) {
-  const score = d.score ?? 100;
-  const scoreColor = score >= 80 ? 'var(--accent-success)' : score >= 50 ? 'var(--accent-warning)' : 'var(--accent-danger)';
-  const dept = d.department || d;
-  return `
-    <div class="dept-card">
-      <div class="dept-card-header">
-        <div>
-          <h4>${dept.name}</h4>
-          <small style="color:var(--text-muted)">${dept.code || '—'} • ${dept.district || '—'}</small>
-        </div>
-        <div class="dept-score-big" style="color:${scoreColor}">${score}%</div>
-      </div>
-      <div class="score-bar" style="max-width:100%;height:6px;margin-top:0.5rem;">
-        <div class="score-bar-fill" style="width:${score}%;background:${scoreColor}"></div>
-      </div>
-      <div class="dept-stats">
-        <div class="dept-stat">
-          <div class="dept-stat-value">${d.totalGrievances ?? 0}</div>
-          <div class="dept-stat-label">Total</div>
-        </div>
-        <div class="dept-stat">
-          <div class="dept-stat-value" style="color:var(--accent-success)">${d.successfulVerifications ?? 0}</div>
-          <div class="dept-stat-label">Verified</div>
-        </div>
-        <div class="dept-stat">
-          <div class="dept-stat-value" style="color:var(--accent-danger)">${d.failedVerifications ?? 0}</div>
-          <div class="dept-stat-label">Failed</div>
-        </div>
-        <div class="dept-stat">
-          <div class="dept-stat-value" style="color:var(--accent-warning)">${d.pendingVerification ?? 0}</div>
-          <div class="dept-stat-label">Pending</div>
-        </div>
-      </div>
-      <div style="margin-top:0.75rem;display:flex;gap:0.5rem;flex-wrap:wrap;">
-        <span class="status-badge status-REOPENED">${d.reopened ?? 0} Reopened</span>
-        <span class="status-badge status-OPEN">${d.open ?? 0} Open</span>
-        <span class="status-badge status-CLOSED">${d.closed ?? 0} Closed</span>
-      </div>
-    </div>
-  `;
-}
-
-// ── API Tester ──────────────────────────────────
-function setEndpoint(method, url, body = '') {
-  document.getElementById('api-method').value = method;
-  document.getElementById('api-url').value = url;
-  document.getElementById('api-body').value = body;
-}
-
-async function sendApiRequest() {
-  const method = document.getElementById('api-method').value;
-  const urlPath = document.getElementById('api-url').value;
-  const body = document.getElementById('api-body').value;
-  const responseEl = document.getElementById('api-response');
-  const statusEl = document.getElementById('api-status');
-
-  responseEl.textContent = 'Loading...';
-  statusEl.textContent = '';
-  statusEl.className = 'api-status';
-
-  const options = { method };
-  if (body && method !== 'GET') {
-    try {
-      options.body = body;
-    } catch (e) {
-      options.body = body;
-    }
+  if (!ok) {
+    panel.className = 'result-card error';
+    panel.textContent = data.error || 'Unable to evaluate verification.';
+    return;
   }
 
-  const { status, data } = await api(urlPath, options);
-
-  statusEl.textContent = `${status}`;
-  statusEl.className = `api-status s${status}`;
-  responseEl.textContent = JSON.stringify(data, null, 2);
+  const isVerified = data.result?.finalStatus === 'verified';
+  panel.className = `result-card ${isVerified ? 'success' : 'error'}`;
+  panel.innerHTML = `
+    <strong>Final status:</strong> ${formatStatus(data.result?.finalStatus).label}<br>
+    ${data.result?.reason || ''}
+  `;
+  showToast(`Verification completed with status ${formatStatus(data.result?.finalStatus).label}.`, isVerified ? 'success' : 'warning');
+  loadGrievances();
+  loadDashboard();
 }
 
-// ── Boot ────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
+async function loadDepartments() {
+  const grid = document.getElementById('dept-cards-grid');
+  grid.innerHTML = '<div class="loading-cell">Loading departments...</div>';
+
+  const dashboard = currentUser?.role === 'collector'
+    ? await api('/api/collector/dashboard')
+    : { ok: false, data: {} };
+
+  if (dashboard.ok && Array.isArray(dashboard.data.departments) && dashboard.data.departments.length) {
+    renderDepartmentCards(dashboard.data.departments);
+    return;
+  }
+
+  const list = await api('/api/departments');
+  if (!list.ok || !Array.isArray(list.data.departments)) {
+    grid.innerHTML = '<div class="loading-cell">Unable to load departments.</div>';
+    return;
+  }
+
+  renderDepartmentCards(list.data.departments.map((department) => ({
+    department,
+    score: 0,
+    totalGrievances: 0,
+    successfulVerifications: 0,
+    failedVerifications: 0,
+    pendingVerification: 0,
+    reopened: 0,
+    open: 0,
+    closed: 0,
+  })));
+}
+
+function renderDepartmentCards(items) {
+  const grid = document.getElementById('dept-cards-grid');
+  grid.innerHTML = items.map((item) => {
+    const department = item.department || item;
+    const color = scoreColor(Number(item.score || 0));
+    return `
+      <article class="dept-card">
+        <div class="dept-card-header">
+          <div>
+            <h3>${department.name}</h3>
+            <div class="inline-hint">${department.code || 'No code'} • ${department.district || 'District unavailable'}</div>
+          </div>
+          <div class="dept-score" style="color:${color};">${Number(item.score || 0)}%</div>
+        </div>
+        <div class="score-track">
+          <div class="score-fill" style="width:${Number(item.score || 0)}%; background:${color};"></div>
+        </div>
+        <div class="dept-kpis">
+          <div class="dept-kpi"><strong>${item.totalGrievances || 0}</strong><span>Total</span></div>
+          <div class="dept-kpi"><strong>${item.successfulVerifications || 0}</strong><span>Verified</span></div>
+          <div class="dept-kpi"><strong>${item.failedVerifications || 0}</strong><span>Failed</span></div>
+          <div class="dept-kpi"><strong>${item.pendingVerification || 0}</strong><span>Pending</span></div>
+        </div>
+      </article>
+    `;
+  }).join('');
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+  applyTheme(currentTheme);
+
+  document.getElementById('theme-toggle').addEventListener('click', () => {
+    applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
+  });
+
+  document.querySelectorAll('.nav-link').forEach((link) => {
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      switchView(link.dataset.view);
+    });
+  });
+
+  document.getElementById('modal-overlay').addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) closeModal();
+  });
+
+  document.getElementById('create-grievance-overlay').addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) closeCreateGrievanceModal();
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      closeModal();
+      closeCreateGrievanceModal();
+    }
+  });
+
+  document.getElementById('evidence-photo').addEventListener('change', (event) => {
+    const [file] = event.target.files || [];
+    if (!file) {
+      return;
+    }
+
+    evidenceCaptureFile = file;
+    evidenceCapturedAt = new Date().toISOString();
+
+    if (evidencePreviewUrl) {
+      URL.revokeObjectURL(evidencePreviewUrl);
+    }
+
+    evidencePreviewUrl = URL.createObjectURL(file);
+    const preview = document.getElementById('evidence-photo-preview');
+    preview.src = evidencePreviewUrl;
+    preview.style.display = 'block';
+    document.getElementById('evidence-photo-label').textContent = 'Fresh photo captured';
+    document.getElementById('evidence-photo-meta').textContent = `${file.name} • ${(file.size / 1024).toFixed(1)} KB • captured at ${new Date(evidenceCapturedAt).toLocaleString()}`;
+  });
+
+  const health = await api('/api/health');
+  if (health.ok && health.data.mockMode) {
+    document.getElementById('mock-badge').style.display = 'inline-flex';
+  }
+  if (!health.ok) {
+    showToast('Backend is not reachable on port 5000.', 'error');
+  }
+
   if (authToken && currentUser) {
     initApp();
   } else {
     showLoginScreen();
   }
-
-  // Check backend health
-  api('/api/health').then(({ ok, data }) => {
-    if (ok) {
-      if (data.mockMode) {
-        document.getElementById('mock-badge').style.display = 'inline-block';
-      }
-    } else {
-      showToast('⚠️ Backend not reachable. Start with: cd backend && npm run dev', 'error');
-    }
-  });
 });
 
-// Close modal on overlay click
-document.getElementById('modal-overlay').addEventListener('click', (e) => {
-  if (e.target === e.currentTarget) closeModal();
-});
-
-// Keyboard shortcut: ESC to close modal
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeModal();
+Object.assign(window, {
+  toggleAuthForm,
+  handleLogin,
+  handleRegister,
+  fillCreds,
+  logout,
+  refreshDashboard,
+  loadGrievances,
+  resolveGrievance,
+  viewGrievanceDetail,
+  closeModal,
+  showCreateGrievanceModal,
+  closeCreateGrievanceModal,
+  handleCreateGrievance,
+  simulateIvr,
+  resolveAndReload,
+  captureEvidenceLocation,
+  prefillEvidenceLocation,
+  submitEvidence,
+  runEvaluation,
 });

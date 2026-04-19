@@ -21,31 +21,76 @@ const sequelize = new Sequelize(
   }
 );
 
-// Run SQL migration files
 async function runMigrations() {
-  const migrationsDir = path.join(__dirname, '../../migrations');
-  
+  const migrationsDir = path.join(__dirname, '../../../migrations');
   if (!fs.existsSync(migrationsDir)) {
     logger.warn('Migrations directory not found');
     return;
   }
 
   const files = fs.readdirSync(migrationsDir)
-    .filter(f => f.endsWith('.sql'))
+    .filter((file) => file.endsWith('.sql'))
     .sort();
 
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      filename VARCHAR(255) PRIMARY KEY,
+      executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  const [appliedRows] = await sequelize.query('SELECT filename FROM schema_migrations');
+  const applied = new Set(appliedRows.map((row) => row.filename));
+
+  if (applied.size === 0) {
+    const [tableRows] = await sequelize.query(`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+    `);
+
+    const existingTables = new Set(tableRows.map((row) => row.table_name));
+    const legacyTablesDetected = ['users', 'grievances', 'field_evidence', 'verification_logs', 'department_scores']
+      .some((tableName) => existingTables.has(tableName));
+
+    if (legacyTablesDetected) {
+      const bootstrapFiles = files.filter((file) => /^00[1-6]_/.test(file));
+      for (const file of bootstrapFiles) {
+        await sequelize.query(
+          'INSERT INTO schema_migrations (filename) VALUES (:filename) ON CONFLICT (filename) DO NOTHING',
+          { replacements: { filename: file } }
+        );
+        applied.add(file);
+      }
+      logger.info('Existing schema detected. Bootstrapped initial migrations as already applied.');
+    }
+  }
+
   for (const file of files) {
+    if (applied.has(file)) {
+      logger.info(`Migration skipped (already applied): ${file}`);
+      continue;
+    }
+
     const filePath = path.join(migrationsDir, file);
     const sql = fs.readFileSync(filePath, 'utf-8');
-    
+
     try {
       await sequelize.query(sql, { raw: true });
-      logger.info(`✓ Migration executed: ${file}`);
+      await sequelize.query(
+        'INSERT INTO schema_migrations (filename) VALUES (:filename) ON CONFLICT (filename) DO NOTHING',
+        { replacements: { filename: file } }
+      );
+      logger.info(`Migration executed: ${file}`);
     } catch (err) {
       if (err.message.includes('already exists') || err.message.includes('duplicate')) {
-        logger.info(`⊛ Migration skipped (already exists): ${file}`);
+        await sequelize.query(
+          'INSERT INTO schema_migrations (filename) VALUES (:filename) ON CONFLICT (filename) DO NOTHING',
+          { replacements: { filename: file } }
+        );
+        logger.info(`Migration skipped (already exists): ${file}`);
       } else {
-        logger.error(`✗ Migration failed: ${file}`, err.message);
+        logger.error(`Migration failed: ${file}`, err.message);
         throw err;
       }
     }
@@ -55,11 +100,11 @@ async function runMigrations() {
 async function connectDB() {
   try {
     await sequelize.authenticate();
-    logger.info('✓ PostgreSQL connected');
-    
+    logger.info('PostgreSQL connected');
+
     await runMigrations();
-    logger.info('✓ All migrations executed');
-    
+    logger.info('All migrations executed');
+
     return sequelize;
   } catch (err) {
     logger.error('Failed to connect to PostgreSQL:', err);

@@ -1,30 +1,29 @@
-// ── Status Enums ─────────────────────────────
 const GRIEVANCE_STATUS = {
-  OPEN: 'OPEN',
-  RESOLVED: 'RESOLVED',
-  PENDING_VERIFICATION: 'PENDING_VERIFICATION',
-  CLOSED: 'CLOSED',
-  REOPENED: 'REOPENED',
+  OPEN: 'open',
+  IN_PROGRESS: 'in_progress',
+  RESOLVED: 'resolved',
+  PENDING_VERIFICATION: 'verification_pending',
+  CLOSED: 'verified',
+  REOPENED: 'reopened',
 };
 
 const CITIZEN_RESPONSE = {
-  CONFIRMED: 'CONFIRMED',
-  DISPUTED: 'DISPUTED',
-  NO_RESPONSE: 'NO_RESPONSE',
-  PENDING: 'PENDING',
+  CONFIRMED: 'resolved',
+  DISPUTED: 'not_resolved',
+  NO_RESPONSE: 'no_answer',
+  PENDING: 'pending',
 };
 
 const USER_ROLES = {
-  CITIZEN: 'CITIZEN',
-  OFFICER: 'OFFICER',
-  DEPARTMENT: 'DEPARTMENT',
-  COLLECTOR: 'COLLECTOR',
+  CITIZEN: 'citizen',
+  OFFICER: 'field_officer',
+  DEPARTMENT: 'department_officer',
+  COLLECTOR: 'collector',
 };
 
-const CATEGORIES = ['ROAD', 'WATER', 'ELECTRICITY', 'SANITATION', 'HEALTH', 'EDUCATION', 'OTHER'];
+const CATEGORIES = ['road', 'water', 'electricity', 'sanitation', 'drainage', 'street_light', 'garbage', 'other'];
 
-// ── Thresholds ───────────────────────────────
-const GPS_THRESHOLD_METERS = parseInt(process.env.GPS_THRESHOLD_METERS || '500', 10);
+const GPS_THRESHOLD_METERS = parseInt(process.env.GPS_THRESHOLD_METERS || '50', 10);
 const EVIDENCE_TIMEOUT_HOURS = parseInt(process.env.EVIDENCE_TIMEOUT_HOURS || '24', 10);
 
 module.exports = {
